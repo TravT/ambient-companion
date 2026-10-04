@@ -144,22 +144,33 @@ def detect_language(query: str) -> str:
 
 
 def query_edge_smolvlm(image_remote_name: str, prompt: str, max_tokens: int = 30) -> dict:
-    """Runs on-device SmolVLM-256M inference via llama-mtmd-cli on S20 FE CPU."""
+    """
+    Runs on-device SmolVLM-256M inference via llama-mtmd-cli on S20 FE CPU.
+    Uses official SmolVLM/Idefics3 prompt template: User:<image>{prompt}<end_of_utterance>\\nAssistant:
+    Pins 4 threads strictly to Cortex-A77 Gold & Prime performance cores (-Cr 4-7).
+    """
     formatted_prompt = (
-        f"<|im_start|>user\n"
-        f"<image>{prompt}<end_of_utterance>\n"
-        f"<|im_start|>assistant\n"
+        f"User:<image>{prompt}<end_of_utterance>\n"
+        f"Assistant:"
     )
     safe_prompt = formatted_prompt.replace('"', '\\"').replace("'", "'\\''")
     cmd = (
         f"llama-mtmd-cli -m {EDGE_MODEL} --mmproj {EDGE_MMPROJ} "
         f"--image {image_remote_name} -p \"{safe_prompt}\" "
-        f"-n {max_tokens} -t 4 --temp 0.2 2>&1"
+        f"-n {max_tokens} -t 4 -Cr 4-7 --temp 0.2 2>&1"
     )
     output, duration = run_edge_command(cmd, timeout=35)
     
+    # Isolate generated completion block (occurs after the last vision batch encoding log)
+    if "mtmd batch encoding done in" in output:
+        raw_completion = output.rsplit("mtmd batch encoding done in", 1)[-1]
+        if "\n" in raw_completion:
+            raw_completion = raw_completion.split("\n", 1)[1]
+    else:
+        raw_completion = output
+        
     cleaned_text = ""
-    for line in output.split("\n"):
+    for line in raw_completion.split("\n"):
         line_clean = line.strip()
         if not line_clean:
             continue
@@ -174,7 +185,13 @@ def query_edge_smolvlm(image_remote_name: str, prompt: str, max_tokens: int = 30
             continue
         cleaned_text += line_clean + " "
         
-    final_text = cleaned_text.replace("<end_of_utterance>", "").replace("<|im_end|>", "").strip()
+    final_text = (
+        cleaned_text
+        .replace("<end_of_utterance>", "")
+        .replace("<|im_end|>", "")
+        .replace("<|im_start|>", "")
+        .strip()
+    )
     return {
         "text": final_text or "No response parsed",
         "duration_sec": round(duration, 2),
