@@ -234,7 +234,8 @@ def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> di
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                resp = requests.post(endpoint, json=payload, timeout=60)
+                # 3s connect timeout for fast fallback, 180s read timeout for host CPU prefill
+                resp = requests.post(endpoint, json=payload, timeout=(3.0, 180.0))
                 dur = time.time() - t0
                 if resp.status_code == 200:
                     data = resp.json()

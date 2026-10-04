@@ -239,8 +239,9 @@ def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any
             crop_param = arguments.get("crop_bbox") or arguments.get("roi_crop")
             
             raw_img = optical_ingestion.acquire_image(source)
-            tier2_img = daemon.BENCHMARK_DIR / f"mcp_tier2_1024px_{raw_img.stem}.jpg"
-            _, meta = optical_ingestion.prepare_budgeted_image(raw_img, 1024, tier2_img, crop_bbox=crop_param)
+            budget_max_dim = 1024 if crop_param else 512
+            tier2_img = daemon.BENCHMARK_DIR / f"mcp_tier2_{budget_max_dim}px_{raw_img.stem}.jpg"
+            _, meta = optical_ingestion.prepare_budgeted_image(raw_img, budget_max_dim, tier2_img, crop_bbox=crop_param)
             
             qwen_res = daemon.query_tier2_qwen(tier2_img, query, max_tokens=max_tokens)
             if qwen_res.get("status") != "success":
