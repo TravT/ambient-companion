@@ -58,6 +58,16 @@ TOOLS = [
                     "default": "auto",
                     "description": "Voice output language: 'auto' (detect from query), 'en' (Option B 25s user cloned voice), or 'pt' (Rafael Portuguese studio voice)."
                 },
+                "crop_bbox": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Optional [ymin, xmin, ymax, xmax] normalized bounding box (0-1000) to crop into a micro-region at 100% uncompressed optical fidelity."
+                },
+                "roi_crop": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Alias for crop_bbox [ymin, xmin, ymax, xmax]."
+                },
                 "play_audio": {
                     "type": "boolean",
                     "default": True,
@@ -94,7 +104,8 @@ TOOLS = [
         "name": "ambient_ocr_and_grounding",
         "description": (
             "Tier 2 Homelab high-precision vision inference using Qwen2.5-VL-3B on Dell Latitude 7390 CPU. "
-            "Resolves dense text, medication names, active ingredients, fine print, and 2D spatial coordinates [ymin, xmin, ymax, xmax]."
+            "Resolves dense text, medication names, active ingredients, fine print, and 2D spatial coordinates [ymin, xmin, ymax, xmax]. "
+            "Supports RoI Crop-on-Demand (crop_bbox) to inspect micro-regions at 100% native optical resolution with automatic coordinate remapping."
         ),
         "parameters": {
             "type": "object",
@@ -107,6 +118,16 @@ TOOLS = [
                     "type": "string",
                     "default": "camera",
                     "description": "Optical source: 'camera', 'droidcam', 'http://...', 'rtsp://...', or file path."
+                },
+                "crop_bbox": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Optional [ymin, xmin, ymax, xmax] normalized bounding box (0-1000) to crop into a micro-region at 100% uncompressed optical fidelity."
+                },
+                "roi_crop": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Alias for crop_bbox [ymin, xmin, ymax, xmax]."
                 },
                 "max_tokens": {
                     "type": "integer",
@@ -162,12 +183,14 @@ def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any
             lang = arguments.get("language", "auto")
             lang_param = None if lang == "auto" else lang
             play_audio = arguments.get("play_audio", True)
+            crop_param = arguments.get("crop_bbox") or arguments.get("roi_crop")
             
             telemetry = daemon.execute_ambient_cycle(
                 query=query,
                 source=source,
                 lang=lang_param,
-                play_audio=play_audio
+                play_audio=play_audio,
+                crop_bbox=crop_param
             )
             return {
                 "content": [
@@ -181,10 +204,11 @@ def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any
         elif tool_name == "ambient_triage_scene":
             query = arguments.get("query") or arguments.get("prompt", "")
             source = arguments.get("source") or arguments.get("image_path", "camera")
+            crop_param = arguments.get("crop_bbox") or arguments.get("roi_crop")
             
             raw_img = optical_ingestion.acquire_image(source)
             edge_img = daemon.BENCHMARK_DIR / f"mcp_edge_384px_{raw_img.stem}.jpg"
-            optical_ingestion.prepare_budgeted_image(raw_img, 384, edge_img)
+            optical_ingestion.prepare_budgeted_image(raw_img, 384, edge_img, crop_bbox=crop_param)
             
             edge_remote = f"mcp_frame_{raw_img.stem}.jpg"
             daemon.subprocess.run([
@@ -212,17 +236,63 @@ def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any
             query = arguments.get("query") or arguments.get("prompt", "")
             source = arguments.get("source") or arguments.get("image_path", "camera")
             max_tokens = arguments.get("max_tokens", 150)
+            crop_param = arguments.get("crop_bbox") or arguments.get("roi_crop")
             
             raw_img = optical_ingestion.acquire_image(source)
-            tier2_img = daemon.BENCHMARK_DIR / f"mcp_tier2_512px_{raw_img.stem}.jpg"
-            optical_ingestion.prepare_budgeted_image(raw_img, 512, tier2_img)
+            tier2_img = daemon.BENCHMARK_DIR / f"mcp_tier2_1024px_{raw_img.stem}.jpg"
+            _, meta = optical_ingestion.prepare_budgeted_image(raw_img, 1024, tier2_img, crop_bbox=crop_param)
             
             qwen_res = daemon.query_tier2_qwen(tier2_img, query, max_tokens=max_tokens)
+            if qwen_res.get("status") != "success":
+                return {
+                    "isError": True,
+                    "content": [{"type": "text", "text": f"Tier 2 Homelab Error: {qwen_res.get('error')}"}]
+                }
+                
+            boxes = optical_ingestion.parse_grounding_coordinates(
+                qwen_res.get("content", ""),
+                orig_w=meta.get("original_width", 1000),
+                orig_h=meta.get("original_height", 1000),
+                crop_info=meta.get("crop_info")
+            )
+            
+            crop_note = ""
+            if meta.get("crop_applied"):
+                ci = meta.get("crop_info", {})
+                crop_note = f"- **RoI Zoom Active**: {ci.get('crop_bbox')} (Native pixel crop: {ci.get('crop_size')})\n"
+                
+            result_data = {
+                "source": source,
+                "image_file": str(raw_img),
+                "canvas_size": [meta.get("original_width"), meta.get("original_height")],
+                "roi_crop_applied": meta.get("crop_applied", False),
+                "crop_info": meta.get("crop_info"),
+                "matches": boxes,
+                "primary_match": boxes[0] if boxes else None,
+                "text": qwen_res.get("content", ""),
+                "tokens": {
+                    "prompt": qwen_res.get("prompt_tokens", 0),
+                    "completion": qwen_res.get("completion_tokens", 0),
+                    "total": qwen_res.get("total_tokens", 0)
+                },
+                "latency_sec": qwen_res.get("duration_sec", 0),
+                "endpoint": qwen_res.get("endpoint", "")
+            }
+            
+            out_text = (
+                f"### Ambient OCR & Visual Grounding (Tier 2)\n"
+                f"- **Source**: {source} ({meta.get('original_width')}x{meta.get('original_height')})\n"
+                f"{crop_note}"
+                f"- **Processed Canvas**: {meta.get('processed_width')}x{meta.get('processed_height')}\n"
+                f"- **Response**:\n{qwen_res.get('content')}\n\n"
+                f"```json\n{json.dumps(result_data, indent=2)}\n```\n\n"
+                f"- **Latency**: {qwen_res.get('duration_sec')}s | **Tokens**: {qwen_res.get('prompt_tokens', 0)} in, {qwen_res.get('completion_tokens', 0)} out"
+            )
             return {
                 "content": [
                     {
                         "type": "text",
-                        "text": f"Tier 2 Homelab Result:\n- Response: {qwen_res.get('content', '')}\n- Latency: {qwen_res.get('duration_sec', 0)}s\n- Status: {qwen_res.get('status', 'unknown')}"
+                        "text": out_text
                     }
                 ]
             }

@@ -45,6 +45,7 @@ import argparse
 import subprocess
 import requests
 from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
 from PIL import Image
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -57,6 +58,7 @@ import optical_ingestion
 CONTAINER_IP = os.getenv("ADB_GATEWAY_HOST", "172.17.0.2")
 DEVICE_TARGET = os.getenv("S20_DEVICE_TARGET", "100.115.165.41:5555")
 LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:8085/v1/chat/completions")
+FALLBACK_LLAMA_SERVER_URL = os.getenv("FALLBACK_LLAMA_SERVER_URL", "http://100.77.169.15:8085/v1/chat/completions")
 MAX_SAFE_TEMP_C = 40.0
 
 # --- Edge Paths & Models ---
@@ -181,7 +183,11 @@ def query_edge_smolvlm(image_remote_name: str, prompt: str, max_tokens: int = 30
 
 
 def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> dict:
-    """Queries Tier 2 llama-server hosting Qwen2.5-VL-3B on host port 8085."""
+    """
+    Queries Tier 2 llama-server hosting Qwen2.5-VL-3B.
+    Supports cold-start 503 retry resilience, token usage tracking, and automatic endpoint fallback
+    between homelab core (127.0.0.1:8085) and desktop GPU node (100.77.169.15:8085).
+    """
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode("utf-8")
         
@@ -200,21 +206,53 @@ def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> di
         "temperature": 0.2
     }
     
+    endpoints = [LLAMA_SERVER_URL]
+    if FALLBACK_LLAMA_SERVER_URL and FALLBACK_LLAMA_SERVER_URL != LLAMA_SERVER_URL:
+        endpoints.append(FALLBACK_LLAMA_SERVER_URL)
+        
+    last_err = None
     t0 = time.time()
-    try:
-        resp = requests.post(LLAMA_SERVER_URL, json=payload, timeout=60)
-        dur = time.time() - t0
-        if resp.status_code == 200:
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            return {
-                "status": "success",
-                "content": content,
-                "duration_sec": round(dur, 2)
-            }
-        return {"status": "error", "error": f"HTTP {resp.status_code}: {resp.text}", "duration_sec": round(dur, 2)}
-    except Exception as e:
-        return {"status": "error", "error": str(e), "duration_sec": round(time.time() - t0, 2)}
+    
+    for endpoint in endpoints:
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(endpoint, json=payload, timeout=60)
+                dur = time.time() - t0
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    usage = data.get("usage", {})
+                    return {
+                        "status": "success",
+                        "content": content,
+                        "duration_sec": round(dur, 2),
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                        "endpoint": endpoint
+                    }
+                elif resp.status_code == 503:
+                    # Model loading or slot busy, exponential backoff
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                else:
+                    last_err = f"HTTP {resp.status_code}: {resp.text}"
+                    break
+            except requests.exceptions.RequestException as e:
+                last_err = str(e)
+                # Network unreachable / connection refused: break to try next endpoint immediately
+                break
+                
+    dur = time.time() - t0
+    return {
+        "status": "error",
+        "error": last_err or "Unknown VLM query error",
+        "duration_sec": round(dur, 2),
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+    }
 
 
 def synthesize_speech(text: str, language: str, out_wav_path: Path) -> dict:
@@ -267,16 +305,23 @@ def play_audio_on_edge(wav_path: Path) -> bool:
     return "TIMEOUT" not in out and "ERROR" not in out
 
 
-def execute_ambient_cycle(query: str, source: str = "camera", lang: str = None, play_audio: bool = True) -> dict:
+def execute_ambient_cycle(
+    query: str,
+    source: str = "camera",
+    lang: str = None,
+    play_audio: bool = True,
+    crop_bbox: Optional[List[int]] = None
+) -> dict:
     """
     Executes an end-to-end ambient companion cycle:
     1. Optical Ingestion (Termux Camera, DroidCam, RTSP, or File)
-    2. Pass 0: Intent Filter
-    3. Pass 1: Edge Triage (SmolVLM-256M)
-    4. Pass 2: Edge Self-Critique
-    5. Tier 2 Homelab Escalation (if needed)
-    6. Pocket-TTS Voice Synthesis
-    7. Galaxy S20 FE Audio Playback
+    2. RoI Crop-on-Demand & Visual Token Budgeting
+    3. Pass 0: Intent Filter
+    4. Pass 1: Edge Triage (SmolVLM-256M)
+    5. Pass 2: Edge Self-Critique
+    6. Tier 2 Homelab Escalation & Coordinate Remapping (if needed)
+    7. Pocket-TTS Voice Synthesis
+    8. Galaxy S20 FE Audio Playback
     """
     cycle_start = time.time()
     if lang is None:
@@ -288,6 +333,8 @@ def execute_ambient_cycle(query: str, source: str = "camera", lang: str = None, 
     print(f"• Query      : \"{query}\"")
     print(f"• Source     : {source}")
     print(f"• Language   : {lang.upper()}")
+    if crop_bbox:
+        print(f"• RoI Crop   : {crop_bbox} (Optical Macro Zoom)")
     
     # Step 0: Check Edge Device Thermal State
     temp_c = get_edge_temperature()
@@ -303,6 +350,12 @@ def execute_ambient_cycle(query: str, source: str = "camera", lang: str = None, 
     opt_dur = round(time.time() - t0_opt, 2)
     print(f"   ✓ Acquired: {raw_img.name} ({opt_dur}s)")
     
+    # Budget frames (384px for Edge SmolVLM, 1024px budgeted for Tier 2 Qwen2.5-VL)
+    edge_img_local = BENCHMARK_DIR / f"daemon_edge_384px_{raw_img.stem}.jpg"
+    tier2_img_local = BENCHMARK_DIR / f"daemon_tier2_1024px_{raw_img.stem}.jpg"
+    _, edge_meta = optical_ingestion.prepare_budgeted_image(raw_img, 384, edge_img_local, crop_bbox=crop_bbox)
+    _, tier2_meta = optical_ingestion.prepare_budgeted_image(raw_img, 1024, tier2_img_local, crop_bbox=crop_bbox)
+    
     telemetry = {
         "query": query,
         "language": lang,
@@ -310,17 +363,15 @@ def execute_ambient_cycle(query: str, source: str = "camera", lang: str = None, 
         "image_file": str(raw_img),
         "optical_acquisition_sec": opt_dur,
         "temp_start_c": temp_c,
+        "crop_applied": tier2_meta.get("crop_applied", False),
+        "crop_info": tier2_meta.get("crop_info"),
+        "canvas_size": [tier2_meta.get("original_width"), tier2_meta.get("original_height")],
+        "grounding_matches": [],
         "steps": [],
         "resolution_tier": "",
         "final_answer": "",
         "total_latency_sec": 0.0
     }
-    
-    # Budget frames
-    edge_img_local = BENCHMARK_DIR / f"daemon_edge_384px_{raw_img.stem}.jpg"
-    tier2_img_local = BENCHMARK_DIR / f"daemon_tier2_512px_{raw_img.stem}.jpg"
-    optical_ingestion.prepare_budgeted_image(raw_img, 384, edge_img_local)
-    optical_ingestion.prepare_budgeted_image(raw_img, 512, tier2_img_local)
     
     # Push edge frame to Termux on S20 FE
     edge_remote_name = f"edge_frame_{raw_img.stem}.jpg"
@@ -334,19 +385,28 @@ def execute_ambient_cycle(query: str, source: str = "camera", lang: str = None, 
     is_ocr = detect_ocr_intent(query)
     final_answer = ""
     
-    if is_ocr:
-        print("\n⚡ [Pass 0: Intent Filter] Dense OCR/Reading intent detected! Bypassing Edge VLM directly to Tier 2.")
-        telemetry["steps"].append({"step": "Pass_0_Intent_Filter", "decision": "Bypass to Tier 2", "reason": "OCR match"})
+    if is_ocr or crop_bbox:
+        reason = "RoI crop zoom active" if crop_bbox else "OCR match"
+        print(f"\n⚡ [Pass 0: Intent Filter] High-precision vision intent ({reason})! Bypassing Edge VLM directly to Tier 2.")
+        telemetry["steps"].append({"step": "Pass_0_Intent_Filter", "decision": "Bypass to Tier 2", "reason": reason})
         telemetry["resolution_tier"] = "Tier 2 (Direct Escalation)"
         
         cue_text = "Reading text with the homelab server..." if lang == "en" else "Lendo o texto com o servidor do homelab..."
         print(f"   🗣️  [Voice Cue]: \"{cue_text}\"")
         
-        print(f"   🏠 Querying Homelab llama-server (512px)...")
-        t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=120)
+        print(f"   🏠 Querying Homelab llama-server (1024px budgeted)...")
+        t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=150)
         final_answer = t2_res.get("content", "")
-        print(f"   ✓ Homelab Output: \"{final_answer}\" ({t2_res.get('duration_sec')}s)")
+        print(f"   ✓ Homelab Output: \"{final_answer}\" ({t2_res.get('duration_sec')}s | {t2_res.get('prompt_tokens', 0)} in, {t2_res.get('completion_tokens', 0)} out)")
         telemetry["steps"].append({"step": "Tier_2_Homelab_Inference", "result": t2_res})
+        
+        boxes = optical_ingestion.parse_grounding_coordinates(
+            final_answer,
+            orig_w=tier2_meta.get("original_width", 1000),
+            orig_h=tier2_meta.get("original_height", 1000),
+            crop_info=tier2_meta.get("crop_info")
+        )
+        telemetry["grounding_matches"] = boxes
         
     else:
         # Pass 1: Edge Triage via SmolVLM-256M
@@ -378,11 +438,19 @@ def execute_ambient_cycle(query: str, source: str = "camera", lang: str = None, 
             cue_text = "Let me check with the homelab server..." if lang == "en" else "Deixe-me verificar com o servidor do homelab..."
             print(f"   🗣️  [Voice Cue]: \"{cue_text}\"")
             
-            print(f"   🏠 Querying Homelab llama-server (512px)...")
-            t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=120)
+            print(f"   🏠 Querying Homelab llama-server (1024px budgeted)...")
+            t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=150)
             final_answer = t2_res.get("content", "")
-            print(f"   ✓ Homelab Output: \"{final_answer}\" ({t2_res.get('duration_sec')}s)")
+            print(f"   ✓ Homelab Output: \"{final_answer}\" ({t2_res.get('duration_sec')}s | {t2_res.get('prompt_tokens', 0)} in, {t2_res.get('completion_tokens', 0)} out)")
             telemetry["steps"].append({"step": "Tier_2_Homelab_Inference", "result": t2_res})
+            
+            boxes = optical_ingestion.parse_grounding_coordinates(
+                final_answer,
+                orig_w=tier2_meta.get("original_width", 1000),
+                orig_h=tier2_meta.get("original_height", 1000),
+                crop_info=tier2_meta.get("crop_info")
+            )
+            telemetry["grounding_matches"] = boxes
             
     telemetry["final_answer"] = final_answer
     
@@ -417,6 +485,7 @@ def main():
     parser.add_argument("--query", "-q", type=str, default="Describe what is on the desk in 15 words.", help="User question or trigger prompt")
     parser.add_argument("--source", "-s", type=str, default="camera", help="Optical source: 'camera', 'droidcam', 'http://...', 'rtsp://...', or '/path/to/file'")
     parser.add_argument("--lang", "-l", type=str, choices=["en", "pt"], default=None, help="Language override (en or pt)")
+    parser.add_argument("--crop-bbox", "--crop", nargs=4, type=int, default=None, metavar=("YMIN", "XMIN", "YMAX", "XMAX"), help="Normalized RoI crop [ymin xmin ymax xmax] (0-1000)")
     parser.add_argument("--no-audio", action="store_true", help="Skip speech synthesis and playback")
     parser.add_argument("--json", action="store_true", help="Output telemetry in JSON format")
     args = parser.parse_args()
@@ -425,7 +494,8 @@ def main():
         query=args.query,
         source=args.source,
         lang=args.lang,
-        play_audio=not args.no_audio
+        play_audio=not args.no_audio,
+        crop_bbox=args.crop_bbox
     )
     
     if args.json:

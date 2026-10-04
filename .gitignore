@@ -8,3 +8,4 @@ env/
 *.jpg
 *.png
 !tests/*.jpg
+tests/benchmark_artifacts/

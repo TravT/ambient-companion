@@ -105,21 +105,52 @@ Add `ambient-companion` to `~/.gemini/config/mcp_config.json`:
 
 | Tool Name | Scope & Capabilities | Parameters |
 | :--- | :--- | :--- |
-| `ambient_escalation_cycle` | Autonomous 2P-VEP: intent detection, edge triage, self-critique, core escalation, voice synthesis, and audio alert. | `query` (str), `source` (str), `language` ("auto"\|"en"\|"pt"), `play_audio` (bool) |
-| `ambient_triage_scene` | Tier 1 Edge triage strictly on Snapdragon 865 CPU (<8s, 0 cloud tokens). **Cannot read fine text.** | `query` (str), `source` (str) |
-| `ambient_ocr_and_grounding` | Tier 2 Homelab inference (Qwen2.5-VL-3B). High-precision reading, pill labels, and 2D bounding boxes. | `query` (str), `source` (str), `max_tokens` (int) |
+| `ambient_escalation_cycle` | Autonomous 2P-VEP: intent detection, edge triage, self-critique, core escalation, voice synthesis, and audio alert. Supports `crop_bbox` for focused macro zoom. | `query` (str), `source` (str), `language` ("auto"\|"en"\|"pt"), `crop_bbox` (list[int]), `play_audio` (bool) |
+| `ambient_triage_scene` | Tier 1 Edge triage strictly on Snapdragon 865 CPU (<8s, 0 cloud tokens). **Cannot read fine text.** | `query` (str), `source` (str), `crop_bbox` (list[int]) |
+| `ambient_ocr_and_grounding` | Tier 2 Homelab inference (Qwen2.5-VL-3B). High-precision reading, pill labels, and 2D bounding boxes. Supports RoI Crop-on-Demand with automatic parent coordinate remapping. | `query` (str), `source` (str), `crop_bbox` (list[int]), `max_tokens` (int) |
 | `ambient_speak` | Kyutai Pocket-TTS voice cloning (<150ms TTFA) + S20 FE stereo speaker playback. | `text` (str), `language` ("en"\|"pt") |
 | `ambient_hardware_status` | Telemetry: battery percentage, temperature (<40.0°C safety breaker), ADB state, and llama-server health. | *None* |
 
 ---
 
-## 6. CLI Usage & Examples
+## 6. ADR-43 RoI Crop-on-Demand & Parity Benchmark
+
+When reading fine text (medication labels, credit card digits, IC chips), downsampling a 12MP camera frame ($4032 \times 3024$) to 512px shrinks text below the optical Nyquist threshold ($\approx 2$ pixels per glyph height).
+
+**RoI Crop-on-Demand (Digital Optical Macro Zoom)** crops the raw uncompressed 12MP bitmap *prior* to downsampling:
+- **100% Native Optical Sensor Resolution**: If the sub-rectangle fits within 1024px, zero downsampling is applied ($1.0\times$ optical scaling).
+- **Coordinate Remapping**: Local bounding boxes regressed by Qwen2.5-VL inside the crop are automatically translated back to full-canvas 12MP pixel coordinates with spatial relation descriptors (`"center-right"`, `"top-center"`).
+- **Token Budgeting**: Caps visual token usage to ~324 tokens (well beneath `--image-max-tokens 512`), delivering a **63.2x pixel area gain** with only a 26% token delta.
+
+### Benchmark Results (12MP Optical Frame: 4032x3024)
+
+| Metric | Iteration 1 (Full 512px) | Iteration 2 (RoI Macro Zoom) | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Optical Scaling Mode** | Downsampled 7.88x | 100% Native Optical Crop | **7.88x Optical Density** |
+| **Target Object Pixel Area** | 4,941 px | 312,180 px | **63.2x Area Gain** |
+| **Title Glyph Height** | 4.06 px (Blurry) | 32.0 px (Sharp) | **7.88x Taller Glyphs** |
+| **Body Glyph Height** | 2.29 px (Illegible) | 18.0 px (100% Legible) | **Resolves Micro-Text** |
+| **Visual Tokens Consumed** | ~256 tokens | ~324 tokens | **Under 512 Token Ceiling** |
+| **Preprocessing Latency** | 200.5 ms | 76.8 ms | **2.6x Faster Ingestion** |
+| **Coordinate Remapping** | None (Canvas level) | Global 12MP Remapped | **Sub-pixel Grounding** |
+
+
+---
+
+## 7. CLI Usage & Examples
 
 ```bash
 # General desk check from live camera (spoken aloud with personal cloned voice)
 python3 dev/ambient-companion/daemon.py \
   --source camera \
   --query "What items are currently sitting on my desk?" \
+  --lang en
+
+# Focused RoI macro zoom on medication bottle at native optical resolution
+python3 dev/ambient-companion/daemon.py \
+  --source camera \
+  --crop-bbox 480 720 640 880 \
+  --query "Read the active ingredients and expiration date." \
   --lang en
 
 # Dense OCR query bypassing edge triage directly to Dell server
@@ -138,7 +169,7 @@ python3 dev/ambient-companion/daemon.py \
 
 ---
 
-## 7. Containerization, GHCR Releases & Image Pinning
+## 8. Containerization, GHCR Releases & Image Pinning
 
 For headless server or Nomad cluster deployments:
 1. **Multi-Arch Dockerfile**: Located at `Dockerfile`, based on `python:3.12-slim` with `curl` and `adb` pre-installed.
