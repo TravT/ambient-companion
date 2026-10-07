@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
 from PIL import Image, ImageOps
 
-CONTAINER_IP = os.getenv("ADB_GATEWAY_HOST", "172.17.0.2")
-DEVICE_TARGET = os.getenv("S20_DEVICE_TARGET", "100.115.165.41:5555")
-DROIDCAM_DEFAULT_URL = os.getenv("DROIDCAM_URL", "http://100.115.165.41:4747/cam/1/frame.jpg")
-DEFAULT_CACHE_DIR = Path("/home/tlima/Enterprise_Hub/data/media/merged/vision/validation")
+import config
+
+CONTAINER_IP = config.ADB_GATEWAY_HOST
+DEVICE_TARGET = config.DEVICE_TARGET
+DROIDCAM_DEFAULT_URL = config.DROIDCAM_URL
+DEFAULT_CACHE_DIR = config.VALIDATION_DIR
 
 
 def wake_and_unlock_edge() -> bool:
@@ -202,6 +204,9 @@ def acquire_image(source: str, dest_path: Optional[Path] = None) -> Path:
             clean_path = clean_path[5:]
         
         path_obj = Path(clean_path).expanduser().resolve()
+        roots = config.allowed_dirs()
+        if roots is not None and not any(path_obj.is_relative_to(r) for r in roots):
+            raise PermissionError(f"Optical source '{source}' is outside the allowed directories.")
         if path_obj.exists() and path_obj.is_file():
             return path_obj
         else:

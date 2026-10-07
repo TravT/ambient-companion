@@ -1,62 +1,94 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Homelab Ambient Companion: Master Host Environment Setup Script
-# Target: Dell Latitude 7390 (Ubuntu 24.04 LTS)
+# Homelab Ambient Companion: master host (Dell Latitude 7390) setup / preflight
+#
+# Default: read-only preflight for the containerized service. Changes nothing,
+# safe to re-run, and prints the exact GitOps deploy command.
+#   --dev        also create the repo .venv and install core deps (host-native CLI)
+#   --with-tts   with --dev, also install pocket-tts (pulls in torch, multi-GB)
+#
+# No secrets live here: the API token is injected at deploy time from the vault
+# (python3 scripts/get_secret.py) by the Ansible/Nomad deploy.
 # ==============================================================================
 set -euo pipefail
 
+DEV=0
+WITH_TTS=0
+for arg in "$@"; do
+    case "$arg" in
+        --dev) DEV=1 ;;
+        --with-tts) WITH_TTS=1 ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        *) echo "Unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
+
 PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${PACKAGE_DIR}/../.." && pwd)"
+ADB_HOST="${ADB_GATEWAY_HOST:-127.0.0.1}"
+DEVICE="${S20_DEVICE_TARGET:-100.115.165.41:5555}"
+LLAMA_HEALTH="${LLAMA_HEALTH_URL:-http://127.0.0.1:8085/health}"
+WARNINGS=0
+
+step() { echo -n "$1 "; }
+ok()   { echo "OK${1:+ ($1)}"; }
+warn() { echo "WARN: $1"; WARNINGS=$((WARNINGS + 1)); }
 
 echo "=========================================================="
-echo " Setting up Ambient Multimodal Companion on Homelab Host"
+echo " Ambient Multimodal Companion: Homelab host preflight"
 echo "=========================================================="
 
-# 1. Verify Python & Virtual Environment
-echo -n "[1/5] Checking Python virtual environment... "
-if [ ! -d "${REPO_ROOT}/.venv" ]; then
-    echo "Creating virtual environment at ${REPO_ROOT}/.venv"
-    python3 -m venv "${REPO_ROOT}/.venv"
-fi
-VENV_PY="${REPO_ROOT}/.venv/bin/python3"
-VENV_PIP="${REPO_ROOT}/.venv/bin/pip"
-echo "OK (${VENV_PY})"
+step "[1/5] Tooling (docker, nomad, adb)..."
+missing=""
+for tool in docker nomad adb; do
+    command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+done
+if [ -z "$missing" ]; then ok; else warn "missing:${missing}"; fi
 
-# 2. Install Python Dependencies
-echo "[2/5] Ensuring Python requirements..."
-"${VENV_PIP}" install -q --upgrade pip
-"${VENV_PIP}" install -q pillow requests pocket-tts
-echo "      Dependencies verified."
-
-# 3. Check ADB Gateway Connectivity to Galaxy S20 FE
-echo -n "[3/5] Verifying ADB Gateway to Galaxy S20 FE (100.115.165.41)... "
-if adb -H 172.17.0.2 -s 100.115.165.41:5555 get-state >/dev/null 2>&1; then
-    echo "CONNECTED"
+step "[2/5] ADB gateway ${ADB_HOST}:5037 -> ${DEVICE}..."
+if [ "$(adb -H "$ADB_HOST" -s "$DEVICE" get-state 2>/dev/null || true)" = "device" ]; then
+    ok "device"
 else
-    echo "WARN: Device offline or ws-scrcpy gateway unreachable."
-    echo "      Ensure ws-scrcpy Nomad allocation is healthy on 172.17.0.2:5037."
+    warn "S20 FE offline or the custom-ws-scrcpy job is not running (nomad job status custom-ws-scrcpy)"
 fi
 
-# 4. Check Nomad llama-server Status
-echo -n "[4/5] Checking Homelab llama-server (Port 8085)... "
-if curl -s -f http://127.0.0.1:8085/health >/dev/null 2>&1 || curl -s -f http://127.0.0.1:8085/v1/models >/dev/null 2>&1; then
-    echo "ACTIVE (200 OK)"
+step "[3/5] Tier 2 llama-server (${LLAMA_HEALTH})..."
+if curl -fsS -m 3 "$LLAMA_HEALTH" >/dev/null 2>&1; then
+    ok "200"
 else
-    echo "WARN: Port 8085 is not responding. Ensure Nomad job 'llama-cpp' is running:"
-    echo "      nomad job run nomad_jobs/llama-cpp.nomad"
+    warn "down. llama-cpp is on-demand: nomad job run -var count=1 nomad_jobs/llama-cpp.nomad (escalations fail until then)"
 fi
 
-# 5. Check Kyutai Pocket-TTS Voice Speaker Latents
-echo -n "[5/5] Verifying Voice Speaker Latents... "
-VOICE_LATENT="${REPO_ROOT}/data/media/merged/vision/benchmark/voice_profile_user_optionB_full25s.safetensors"
-if [ -f "${VOICE_LATENT}" ]; then
-    echo "OK ($(ls -lh "${VOICE_LATENT}" | awk '{print $5}'))"
+step "[4/5] Ambient service (http://127.0.0.1:8089/health)..."
+if curl -fsS -m 3 http://127.0.0.1:8089/health >/dev/null 2>&1; then
+    ok "running"
 else
-    echo "WARN: Personalized speaker embedding missing at ${VOICE_LATENT}."
+    echo "not running (deploy below)"
+fi
+
+step "[5/5] English voice profile..."
+VOICE="${VOICE_PROFILE_EN:-${REPO_ROOT}/data/media/merged/vision/benchmark/voice_profile_user_optionB_full25s.safetensors}"
+if [ -f "$VOICE" ]; then
+    ok "$(du -h "$VOICE" | cut -f1)"
+else
+    warn "missing ${VOICE} (re-create with: pocket-tts export-voice <recording.wav> <out.safetensors>)"
+fi
+
+if [ "$DEV" = "1" ]; then
+    echo ""
+    echo "[dev] Host-native CLI environment in ${REPO_ROOT}/.venv"
+    [ -d "${REPO_ROOT}/.venv" ] || python3 -m venv "${REPO_ROOT}/.venv"
+    "${REPO_ROOT}/.venv/bin/pip" install -q -r "${PACKAGE_DIR}/requirements.txt"
+    if [ "$WITH_TTS" = "1" ]; then
+        "${REPO_ROOT}/.venv/bin/pip" install -q -r "${PACKAGE_DIR}/requirements-tts.txt"
+    fi
+    echo "[dev] Done. Try: ${REPO_ROOT}/.venv/bin/python ${PACKAGE_DIR}/daemon.py --source camera --query \"What is on my desk?\""
 fi
 
 echo ""
 echo "=========================================================="
-echo " Setup Complete. To test an ambient cycle:"
-echo "   ${VENV_PY} ${PACKAGE_DIR}/daemon.py --source camera --query \"What is on my desk?\""
+echo " Preflight finished with ${WARNINGS} warning(s)."
+echo " Deploy (GitOps only, never ad-hoc docker run):"
+echo "   ansible-playbook -i ansible/inventory.ini ansible/site.yml --tags docker --vault-password-file ansible/.vault_pass"
+echo " Then verify: nomad job status ambient-companion && curl -s 127.0.0.1:8089/ready"
 echo "=========================================================="

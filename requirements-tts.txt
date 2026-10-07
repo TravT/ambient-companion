@@ -1,0 +1,2 @@
+# Optional voice synthesis (pulls in torch; ~GBs). Not installed in the slim container image.
+pocket-tts==3.3.0

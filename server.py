@@ -12,6 +12,7 @@ Exposes 5 typed JSON-RPC 2.0 tools with Pluggable Optical Ingestion:
 import sys
 import json
 import time
+import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -19,16 +20,64 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
+import config
 import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.1.0"
 PROTOCOL_VERSION = "2024-11-05"
+
+
+# Serializes everything that drives the camera / ADB session / edge CPU.
+HARDWARE_LOCK = threading.Lock()
+HARDWARE_TOOLS = {
+    "ambient_escalation_cycle", "ambient_triage_scene",
+    "ambient_ocr_and_grounding", "ambient_speak",
+}
 
 
 def log_debug(msg: str):
     print(f"[{SERVER_NAME}] {msg}", file=sys.stderr, flush=True)
+
+
+def llama_health_url() -> str:
+    """Health endpoint of the Tier 2 llama-server derived from its chat URL."""
+    base = daemon.LLAMA_SERVER_URL.split("/v1/", 1)[0].rstrip("/")
+    return f"{base}/health"
+
+
+def readiness() -> dict:
+    """Live hardware and dependency state. Never raises; unreachable parts report False/None."""
+    temp_c = daemon.get_edge_temperature()
+    battery = None
+    adb_ok = temp_c is not None
+    try:
+        res = daemon.subprocess.run(
+            daemon.adb_args("shell", "dumpsys battery | grep level"),
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in res.stdout.split("\n"):
+            if "level" in line:
+                battery = line.split(":")[-1].strip() + "%"
+                adb_ok = True
+    except Exception:
+        pass
+
+    llama_ok = False
+    try:
+        llama_ok = daemon.requests.get(llama_health_url(), timeout=3).status_code == 200
+    except Exception:
+        pass
+
+    return {
+        "adb": adb_ok,
+        "edge_temp_c": temp_c,
+        "battery_level": battery,
+        "thermal_breaker": temp_c is not None and temp_c >= daemon.MAX_SAFE_TEMP_C,
+        "llama_server": llama_ok,
+        "tts_available": bool(daemon.POCKET_TTS_BIN),
+    }
 
 
 TOOLS = [
@@ -175,7 +224,7 @@ TOOLS = [
 ]
 
 
-def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     try:
         if tool_name == "ambient_escalation_cycle":
             query = arguments.get("query") or arguments.get("prompt", "")
@@ -210,18 +259,9 @@ def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any
             edge_img = daemon.BENCHMARK_DIR / f"mcp_edge_384px_{raw_img.stem}.jpg"
             optical_ingestion.prepare_budgeted_image(raw_img, 384, edge_img, crop_bbox=crop_param)
             
-            edge_remote = f"mcp_frame_{raw_img.stem}.jpg"
-            daemon.subprocess.run([
-                "adb", "-H", daemon.CONTAINER_IP, "-s", daemon.DEVICE_TARGET,
-                "push", str(edge_img), f"/sdcard/Download/{edge_remote}"
-            ], capture_output=True, check=False)
-            daemon.run_edge_command(
-                f"cp /sdcard/Download/{edge_remote} {daemon.EDGE_TERMUX_HOME}/{edge_remote} && "
-                f"chown u0_a356:u0_a356 {daemon.EDGE_TERMUX_HOME}/{edge_remote} && "
-                f"chmod 644 {daemon.EDGE_TERMUX_HOME}/{edge_remote}",
-                as_root=True
-            )
-            
+            edge_remote = daemon.safe_remote_name(f"mcp_frame_{raw_img.stem}.jpg")
+            daemon.push_frame_to_edge(edge_img, edge_remote)
+
             triage_res = daemon.query_edge_smolvlm(edge_remote, query, max_tokens=30)
             return {
                 "content": [
@@ -320,34 +360,18 @@ def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any
             }
 
         elif tool_name == "ambient_hardware_status":
-            temp_c = daemon.get_edge_temperature()
-            
-            # Check S20 battery level
-            bat_cmd = ["adb", "-H", daemon.CONTAINER_IP, "-s", daemon.DEVICE_TARGET, "shell", "dumpsys battery | grep level"]
-            bat_level = "Unknown"
-            try:
-                bat_res = daemon.subprocess.run(bat_cmd, capture_output=True, text=True, timeout=5)
-                for line in bat_res.stdout.split("\n"):
-                    if "level" in line:
-                        bat_level = line.split(":")[-1].strip() + "%"
-            except Exception:
-                pass
-                
-            # Check llama-server health
-            llama_ok = False
-            try:
-                r = daemon.requests.get("http://127.0.0.1:8085/health", timeout=3)
-                llama_ok = r.status_code == 200
-            except Exception:
-                pass
-                
+            r = readiness()
+            temp = f"{r['edge_temp_c']:.1f}°C" if r["edge_temp_c"] is not None else "UNKNOWN (edge unreachable)"
+            breaker = "YES - OVERHEAT" if r["thermal_breaker"] else ("UNKNOWN" if r["edge_temp_c"] is None else "NO (Normal)")
             status_report = (
                 f"Ambient Companion Hardware Status:\n"
-                f"- S20 FE Battery Temp: {temp_c:.1f}°C (Circuit breaker limit: {daemon.MAX_SAFE_TEMP_C}°C)\n"
-                f"- S20 FE Battery Level: {bat_level}\n"
-                f"- Thermal Breaker Engaged: {'YES - OVERHEAT' if temp_c >= daemon.MAX_SAFE_TEMP_C else 'NO (Normal)'}\n"
-                f"- ADB Gateway (ws-scrcpy): Connected at {daemon.CONTAINER_IP}:5555\n"
-                f"- Homelab llama-server (Port 8085): {'HEALTHY (200 OK)' if llama_ok else 'UNHEALTHY / OFFLINE'}"
+                f"- S20 FE Battery Temp: {temp} (Circuit breaker limit: {daemon.MAX_SAFE_TEMP_C}°C)\n"
+                f"- S20 FE Battery Level: {r['battery_level'] or 'Unknown'}\n"
+                f"- Thermal Breaker Engaged: {breaker}\n"
+                f"- ADB Gateway: {'CONNECTED' if r['adb'] else 'UNREACHABLE'} "
+                f"({daemon.CONTAINER_IP} -> {daemon.DEVICE_TARGET})\n"
+                f"- Homelab llama-server: {'HEALTHY (200 OK)' if r['llama_server'] else 'UNHEALTHY / OFFLINE'}\n"
+                f"- Voice (pocket-tts): {'available' if r['tts_available'] else 'not installed in this runtime'}"
             )
             return {
                 "content": [{"type": "text", "text": status_report}]
@@ -358,6 +382,50 @@ def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any
 
     except Exception as e:
         return {"isError": True, "content": [{"type": "text", "text": f"Tool execution failed: {str(e)}"}]}
+
+
+def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a tool; camera/ADB tools are serialized and answer "busy" instead of queueing forever."""
+    if tool_name not in HARDWARE_TOOLS:
+        return _run_tool(tool_name, arguments)
+    if not HARDWARE_LOCK.acquire(timeout=config.HARDWARE_LOCK_TIMEOUT_SEC):
+        return {"isError": True, "content": [{
+            "type": "text",
+            "text": "Companion hardware is busy with another request; retry shortly.",
+        }]}
+    try:
+        return _run_tool(tool_name, arguments)
+    finally:
+        HARDWARE_LOCK.release()
+
+
+def dispatch(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Handle one JSON-RPC request. Returns the response, or None for notifications."""
+    req_id = req.get("id")
+    method = req.get("method")
+    params = req.get("params") or {}
+
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}
+            }
+        }
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+    if method == "tools/call":
+        result = handle_tool_call(params.get("name"), params.get("arguments") or {})
+        return {"jsonrpc": "2.0", "id": req_id, "result": result}
+    if method == "notifications/initialized":
+        return None
+    if req_id is not None:
+        return {"jsonrpc": "2.0", "id": req_id,
+                "error": {"code": -32601, "message": f"Method not found: {method}"}}
+    return None
 
 
 def run_stdio_server():
@@ -371,62 +439,19 @@ def run_stdio_server():
         except json.JSONDecodeError as err:
             log_debug(f"JSON parse error: {err}")
             continue
-
-        req_id = req.get("id")
-        method = req.get("method")
-        params = req.get("params", {})
-
-        if method == "initialize":
-            resp = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}
-                }
-            }
+        resp = dispatch(req)
+        if resp is not None:
             sys.stdout.write(json.dumps(resp) + "\n")
             sys.stdout.flush()
-
-        elif method == "tools/list":
-            resp = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {"tools": TOOLS}
-            }
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
-
-        elif method == "tools/call":
-            tool_name = params.get("name")
-            tool_args = params.get("arguments", {})
-            result = handle_tool_call(tool_name, tool_args)
-            resp = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": result
-            }
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
-
-        elif method == "notifications/initialized":
-            pass
-
-        else:
-            if req_id is not None:
-                resp = {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32601, "message": f"Method not found: {method}"}
-                }
-                sys.stdout.write(json.dumps(resp) + "\n")
-                sys.stdout.flush()
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h", "help"):
-        print("Ambient Companion MCP Server v2.0.0 (Stdio JSON-RPC 2.0)")
+        print(f"Ambient Companion MCP Server v{SERVER_VERSION} (stdio default; `serve` = HTTP)")
         print("Tools: ambient_escalation_cycle, ambient_triage_scene, ambient_ocr_and_grounding, ambient_speak, ambient_hardware_status")
         sys.exit(0)
-    run_stdio_server()
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        import http_service
+        http_service.serve()
+    else:
+        run_stdio_server()

@@ -54,50 +54,83 @@ The companion supports multiple visual capture adapters via `optical_ingestion.p
 ```
 dev/ambient-companion/
 ├── daemon.py                  # Core 2P-VEP escalation daemon (CLI + library)
-├── server.py                  # Model Context Protocol (MCP v2.0) stdio server
+├── server.py                  # MCP v2.1 tools: stdio by default, `serve` = HTTP service
+├── http_service.py            # HTTP front-end: /health, /ready, POST /mcp (bearer token)
 ├── optical_ingestion.py       # Pluggable multi-source optical acquisition engine
-├── setup_homelab.sh           # Master host environment bootstrap (Ubuntu/Debian)
-├── setup_edge_s20.sh          # S20 FE satellite bootstrap (Termux on Android 13)
-├── setup_windows.bat          # Windows client & bridge installer
+├── config.py                  # Environment-driven settings (no host paths in code)
+├── housekeeping.py            # Retention for frames/WAVs (host cache + S20 Download)
+├── Dockerfile                 # Non-root slim image (HTTP + MCP service)
+├── requirements.txt           # Core deps (pillow, requests)
+├── requirements-tts.txt       # Optional pocket-tts (multi-GB, not in the image)
+├── setup_homelab.sh           # Dell preflight + GitOps deploy hint (--dev for a host venv)
+├── setup_edge_s20.sh          # S20 FE satellite bootstrap (Termux), checksum-verified models
+├── setup_windows.bat          # Windows client installer (private venv + service check)
 ├── README.md                  # Authoritative operational manual
 ├── prompts/
 │   └── agent_system_prompt.md # AI agent instructions & tool-calling governance
-└── tests/
-    └── test_optical_ingestion.py # Unit tests for optical ingestion
+└── tests/                     # Hardware-free unit tests (run in CI before the image build)
 ```
+
+### Where each part runs
+
+| Target | Runs | How it is installed |
+| :--- | :--- | :--- |
+| **Dell (homelab)** | The containerized service (HTTP + MCP, ADB client, calls Tier 2 llama-server) | Nomad job via Ansible `--tags docker` |
+| **S20 FE** | Camera, SmolVLM triage, speaker (native Termux) | `setup_edge_s20.sh` |
+| **Windows / other desktops** | Client only | `setup_windows.bat` |
 
 ---
 
 ## 4. Setup & Deployment
 
-### Step A: Master Host (Dell Latitude 7390)
-Run the automated host setup script:
+### Step A: Master Host (Dell Latitude 7390), containerized service
+Run the read-only preflight (safe to repeat, changes nothing):
 ```bash
 bash dev/ambient-companion/setup_homelab.sh
 ```
-This verifies Python 3.10+, installs `pillow`, `requests`, and `pocket-tts`, checks connectivity to the S20 FE ADB gateway, and verifies that the Nomad `llama-cpp` job is running on port 8085.
+It checks `docker`/`nomad`/`adb`, the ADB gateway on `127.0.0.1:5037`, the Tier 2 llama-server and the voice profile, then prints the deploy command. Deployment is GitOps only:
+```bash
+ansible-playbook -i ansible/inventory.ini ansible/site.yml --tags docker --vault-password-file ansible/.vault_pass
+```
+The bearer token (`AMBIENT_API_TOKEN`) comes from the vault at deploy time (`python3 scripts/get_secret.py`); nothing secret is stored in this repo. For a host-native CLI instead of the container: `bash setup_homelab.sh --dev` (add `--with-tts` for pocket-tts).
 
 ### Step B: Edge Satellite (Galaxy S20 FE)
-Inside Termux on the S20 FE, run:
+Inside Termux on the S20 FE, run (re-runnable; models are verified against Hugging Face's SHA-256):
 ```bash
 bash setup_edge_s20.sh
 ```
-This installs `termux-api`, configures the PulseAudio AAudio sink, and verifies quantized `SmolVLM-256M` (266 MB) and `mmproj` weights.
 
-### Step C: Register MCP Server with Antigravity / Claude Code
-Add `ambient-companion` to `~/.gemini/config/mcp_config.json`:
+### Step C: Register the MCP server
+**Local agent on the Dell (stdio, no network):** add to `~/.gemini/config/mcp_config.json`:
 ```json
 {
   "mcpServers": {
     "ambient-companion": {
       "command": "/home/tlima/Enterprise_Hub/.venv/bin/python3",
-      "args": [
-        "/home/tlima/Enterprise_Hub/dev/ambient-companion/server.py"
-      ]
+      "args": ["/home/tlima/Enterprise_Hub/dev/ambient-companion/server.py"]
     }
   }
 }
 ```
+**Remote clients (HTTP):** `POST http://ambient.home.arpa/mcp` with `Authorization: Bearer $AMBIENT_API_TOKEN` and one JSON-RPC 2.0 request per call (`tools/list`, `tools/call`, ...). `GET /health` is liveness only; `GET /ready` reports ADB, edge temperature, battery, llama-server and voice availability.
+
+### Step D: Windows client
+Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arpa/health`). Set `AMBIENT_API_TOKEN` in your user environment.
+
+### Configuration (environment)
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `ADB_GATEWAY_HOST` | `127.0.0.1` | ADB server of `custom-ws-scrcpy` (host loopback `:5037`) |
+| `S20_DEVICE_TARGET` | `100.115.165.41:5555` | Edge device serial |
+| `EDGE_TERMUX_UID` | `u0_a356` | Termux app uid on the S20 |
+| `LLAMA_SERVER_URL` / `FALLBACK_LLAMA_SERVER_URL` | `127.0.0.1:8085` / GPU desktop | Tier 2 endpoints |
+| `VLM_MODEL` | `qwen2.5vl:3b` | Model alias sent to llama-server |
+| `AMBIENT_DATA_DIR` | `/home/tlima/Enterprise_Hub/data` | Data root (`/data` in the container) |
+| `AMBIENT_ALLOWED_DIRS` | unset (unrestricted) | Colon list the `file` source may read (set in the container) |
+| `AMBIENT_HOST` / `AMBIENT_PORT` | `127.0.0.1` / `8089` | HTTP listener |
+| `AMBIENT_API_TOKEN` | empty (auth off) | Bearer token for `POST /mcp` |
+| `AMBIENT_RETENTION_DAYS` | `7` | Age after which cached frames/WAVs are deleted |
+| `POCKET_TTS_BIN` | `pocket-tts` on `PATH` | Voice synthesis binary (absent in the slim image; speech is skipped with a clear error) |
 
 ---
 
@@ -171,12 +204,7 @@ python3 dev/ambient-companion/daemon.py \
 
 ## 8. Containerization, GHCR Releases & Image Pinning
 
-For headless server or Nomad cluster deployments:
-1. **Multi-Arch Dockerfile**: Located at `Dockerfile`, based on `python:3.12-slim` with `curl` and `adb` pre-installed.
-2. **GitHub Actions CI/CD**: `.github/workflows/docker-publish.yml` automatically builds and pushes multi-arch images on every push or release tag:
-   `ghcr.io/travt/ambient-companion:latest`
-3. **Nomad Job Specification**: `nomad_jobs/ambient-companion.nomad` runs the containerized daemon with Traefik dynamic routing to `ambient.home.arpa:8089`.
-4. **Immutable Image Pinning (ADR-39)**:
-   In `nomad_jobs/ambient-companion.nomad`, images are pinned by exact SHA256 digest (`image = "ghcr.io/travt/ambient-companion:latest@sha256:..."`) with `force_pull = false` to guarantee cold-boot zero-deadlock resilience.
-5. **Renovate Ingestion**: Matches the `"own images"` package rule in `renovate.json`, generating automated pull requests when new release digests are published.
-
+1. **Image**: `Dockerfile` builds a slim, non-root (`uid 1000`) service on `python:3.12-slim` with `adb` and `ffmpeg`. No `raw_exec` or privileges are needed. Voice synthesis is not baked in (`--build-arg WITH_TTS=1` adds pocket-tts and needs far more memory).
+2. **CI**: `.github/workflows/docker-publish.yml` runs the unit tests, then builds and pushes `ghcr.io/travt/ambient-companion` tagged `sha-<short>` on every main build and `vX.Y.Z` on release tags (plus the moving `latest`/`main` tags, which the cluster never pins).
+3. **Nomad job**: `nomad_jobs/ambient-companion.nomad` in the cluster repo runs it with an HTTP `/health` check, a Traefik route and a Tailscale-safe loopback bind.
+4. **Pinning (ADR-47)**: the job pins `ghcr.io/travt/ambient-companion:<version tag>@sha256:<digest>`. Read the digest from the registry (`docker buildx imagetools inspect ghcr.io/travt/ambient-companion:<tag>`), never type it. Renovate (`"own images"` rule) bumps tag and digest together.

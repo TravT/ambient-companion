@@ -41,6 +41,7 @@ import time
 import json
 import base64
 import re
+import shlex
 import argparse
 import subprocess
 import requests
@@ -52,38 +53,49 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
+import config
 import optical_ingestion
 
-# --- Cluster Endpoints & Hardware Addresses ---
-CONTAINER_IP = os.getenv("ADB_GATEWAY_HOST", "172.17.0.2")
-DEVICE_TARGET = os.getenv("S20_DEVICE_TARGET", "100.115.165.41:5555")
-LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:8085/v1/chat/completions")
-FALLBACK_LLAMA_SERVER_URL = os.getenv("FALLBACK_LLAMA_SERVER_URL", "http://100.77.169.15:8085/v1/chat/completions")
-MAX_SAFE_TEMP_C = 40.0
+# --- Cluster Endpoints & Hardware Addresses (see config.py; env-overridable) ---
+CONTAINER_IP = config.ADB_GATEWAY_HOST
+DEVICE_TARGET = config.DEVICE_TARGET
+LLAMA_SERVER_URL = config.LLAMA_SERVER_URL
+FALLBACK_LLAMA_SERVER_URL = config.FALLBACK_LLAMA_SERVER_URL
+MAX_SAFE_TEMP_C = config.MAX_SAFE_TEMP_C
 
 # --- Edge Paths & Models ---
-EDGE_TERMUX_HOME = "/data/data/com.termux/files/home"
-EDGE_MODEL = "models/SmolVLM-256M-Instruct-Q8_0.gguf"
-EDGE_MMPROJ = "models/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf"
+EDGE_TERMUX_HOME = config.EDGE_TERMUX_HOME
+EDGE_MODEL = config.EDGE_MODEL
+EDGE_MMPROJ = config.EDGE_MMPROJ
 
 # --- Host Assets & Voice Profiles ---
-WORKSPACE_DIR = Path("/home/tlima/Enterprise_Hub")
-BENCHMARK_DIR = WORKSPACE_DIR / "data/media/merged/vision/benchmark"
-GDRIVE_TTS_DIR = WORKSPACE_DIR / "data/media/cloud_drive/VoiceRecordingsTTS/SynthesizedOutput"
-DROPZONE_TTS_DIR = WORKSPACE_DIR / "data/dropzone/files/tts_cloned_output"
-VENV_PYTHON = WORKSPACE_DIR / ".venv/bin/python3"
-POCKET_TTS_BIN = WORKSPACE_DIR / ".venv/bin/pocket-tts"
-
-VOICE_PROFILE_EN = BENCHMARK_DIR / "voice_profile_user_optionB_full25s.safetensors"
-VOICE_PROFILE_PT = "rafael"
+BENCHMARK_DIR = config.BENCHMARK_DIR
+POCKET_TTS_BIN = config.POCKET_TTS_BIN
+VOICE_PROFILE_EN = config.VOICE_PROFILE_EN
+VOICE_PROFILE_PT = config.VOICE_PROFILE_PT
 
 
-def get_edge_temperature() -> float:
-    """Reads S20 FE battery temperature in Celsius via ADB."""
-    cmd = [
-        "adb", "-H", CONTAINER_IP, "-s", DEVICE_TARGET,
-        "shell", "su -c 'cat /sys/class/power_supply/battery/temp 2>/dev/null || cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null'"
-    ]
+def safe_remote_name(name: str) -> str:
+    """Make a file name safe to embed in an edge shell command."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+
+
+def adb_args(*args: str) -> List[str]:
+    """adb argv for the edge device (uses the module-level gateway/target)."""
+    return ["adb", "-H", CONTAINER_IP, "-s", DEVICE_TARGET, *args]
+
+
+def get_edge_temperature() -> Optional[float]:
+    """Reads S20 FE battery temperature in Celsius via ADB.
+
+    Returns None when the device cannot be read, so callers fail closed
+    instead of treating "unreachable" as a cool 0.0 degrees.
+    """
+    inner = (
+        "cat /sys/class/power_supply/battery/temp 2>/dev/null || "
+        "cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null"
+    )
+    cmd = adb_args("shell", f"su -c {shlex.quote(inner)}")
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         raw = res.stdout.strip()
@@ -96,21 +108,26 @@ def get_edge_temperature() -> float:
             return val
     except Exception:
         pass
-    return 0.0
+    return None
 
 
 def run_edge_command(cmd: str, timeout: int = 45, as_root: bool = False) -> tuple[str, float]:
-    """Runs a shell command inside Termux on the S20 FE."""
+    """Runs a shell command inside Termux on the S20 FE.
+
+    `cmd` is quoted as a single argument for `su -c`, so quotes and shell
+    metacharacters inside it reach the device shell unchanged.
+    """
     if as_root:
-        full_cmd = ["adb", "-H", CONTAINER_IP, "-s", DEVICE_TARGET, "shell", f"su -c '{cmd}'"]
+        full_cmd = adb_args("shell", f"su -c {shlex.quote(cmd)}")
     else:
-        full_cmd = [
-            "adb", "-H", CONTAINER_IP, "-s", DEVICE_TARGET,
+        inner = (
+            f"export HOME={EDGE_TERMUX_HOME}; export PREFIX=/data/data/com.termux/files/usr; "
+            f"export TMPDIR=$PREFIX/tmp; export PATH=$PREFIX/bin:$PATH; cd {EDGE_TERMUX_HOME}; {cmd}"
+        )
+        full_cmd = adb_args(
             "shell",
-            f"su u0_a356 -g 3003 -G 9997 -G 1015 -G 1077 -c "
-            f"'export HOME={EDGE_TERMUX_HOME}; export PREFIX=/data/data/com.termux/files/usr; "
-            f"export TMPDIR=$PREFIX/tmp; export PATH=$PREFIX/bin:$PATH; cd {EDGE_TERMUX_HOME}; {cmd}'"
-        ]
+            f"su {config.EDGE_TERMUX_UID} -g 3003 -G 9997 -G 1015 -G 1077 -c {shlex.quote(inner)}",
+        )
     t0 = time.time()
     try:
         proc = subprocess.run(full_cmd, capture_output=True, text=True, timeout=timeout)
@@ -120,6 +137,21 @@ def run_edge_command(cmd: str, timeout: int = 45, as_root: bool = False) -> tupl
         return "TIMEOUT", timeout
     except Exception as e:
         return f"ERROR: {e}", time.time() - t0
+
+
+def push_frame_to_edge(local_path: Path, remote_name: str) -> None:
+    """Copy a frame to the S20 FE and make it readable by the Termux user."""
+    remote_name = safe_remote_name(remote_name)
+    subprocess.run(
+        adb_args("push", str(local_path), f"/sdcard/Download/{remote_name}"),
+        capture_output=True, check=False,
+    )
+    dest = f"{EDGE_TERMUX_HOME}/{remote_name}"
+    run_edge_command(
+        f"cp /sdcard/Download/{remote_name} {dest} && "
+        f"chown {config.EDGE_TERMUX_UID}:{config.EDGE_TERMUX_UID} {dest} && chmod 644 {dest}",
+        as_root=True,
+    )
 
 
 def detect_ocr_intent(query: str) -> bool:
@@ -134,6 +166,18 @@ def detect_ocr_intent(query: str) -> bool:
     return any(re.search(p, q) for p in patterns)
 
 
+_YES_RE = re.compile(r"\b(yes|sim)\b", re.IGNORECASE)
+_NO_RE = re.compile(r"\b(no|n[aã]o|unclear|unsure|uncertain)\b", re.IGNORECASE)
+
+
+def critique_is_confident(text: str) -> bool:
+    """Pass 2 verdict: an affirmative answer with no negation or doubt.
+
+    Matches whole words, so "NOTE" or "KNOWN" no longer count as "NO".
+    """
+    return bool(_YES_RE.search(text)) and not _NO_RE.search(text)
+
+
 def detect_language(query: str) -> str:
     """Infers whether user query is Portuguese or English."""
     pt_keywords = ["o que", "tem", "mesa", "leia", "você", "xarope", "frasco", "sim", "não", "está", "onde"]
@@ -143,22 +187,27 @@ def detect_language(query: str) -> str:
     return "en"
 
 
+def build_smolvlm_command(image_remote_name: str, prompt: str, max_tokens: int) -> str:
+    """Shell command for llama-mtmd-cli with every user-controlled value quoted."""
+    formatted_prompt = (
+        f"User:<image>{prompt}<end_of_utterance>\n"
+        f"Assistant:"
+    )
+    argv = [
+        "llama-mtmd-cli", "-m", EDGE_MODEL, "--mmproj", EDGE_MMPROJ,
+        "--image", safe_remote_name(image_remote_name), "-p", formatted_prompt,
+        "-n", str(int(max_tokens)), "-t", "4", "-Cr", "4-7", "--temp", "0.2",
+    ]
+    return " ".join(shlex.quote(a) for a in argv) + " 2>&1"
+
+
 def query_edge_smolvlm(image_remote_name: str, prompt: str, max_tokens: int = 30) -> dict:
     """
     Runs on-device SmolVLM-256M inference via llama-mtmd-cli on S20 FE CPU.
     Uses official SmolVLM/Idefics3 prompt template: User:<image>{prompt}<end_of_utterance>\\nAssistant:
     Pins 4 threads strictly to Cortex-A77 Gold & Prime performance cores (-Cr 4-7).
     """
-    formatted_prompt = (
-        f"User:<image>{prompt}<end_of_utterance>\n"
-        f"Assistant:"
-    )
-    safe_prompt = formatted_prompt.replace('"', '\\"').replace("'", "'\\''")
-    cmd = (
-        f"llama-mtmd-cli -m {EDGE_MODEL} --mmproj {EDGE_MMPROJ} "
-        f"--image {image_remote_name} -p \"{safe_prompt}\" "
-        f"-n {max_tokens} -t 4 -Cr 4-7 --temp 0.2 2>&1"
-    )
+    cmd = build_smolvlm_command(image_remote_name, prompt, max_tokens)
     output, duration = run_edge_command(cmd, timeout=35)
     
     # Isolate generated completion block (occurs after the last vision batch encoding log)
@@ -209,7 +258,7 @@ def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> di
         img_b64 = base64.b64encode(f.read()).decode("utf-8")
         
     payload = {
-        "model": "qwen2.5vl:3b",
+        "model": config.VLM_MODEL,
         "messages": [
             {
                 "role": "user",
@@ -274,15 +323,21 @@ def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> di
 
 
 def synthesize_speech(text: str, language: str, out_wav_path: Path) -> dict:
-    """Synthesizes speech using Kyutai Pocket-TTS."""
+    """Synthesizes speech using Kyutai Pocket-TTS (`pocket-tts generate`)."""
+    if not POCKET_TTS_BIN:
+        return {
+            "status": "error",
+            "error": "TTS unavailable: pocket-tts is not installed (set POCKET_TTS_BIN).",
+            "duration_sec": 0.0,
+        }
     out_wav_path.parent.mkdir(parents=True, exist_ok=True)
     if language == "en":
         voice_flag = ["--voice", str(VOICE_PROFILE_EN)]
     else:
         voice_flag = ["--voice", VOICE_PROFILE_PT]
-        
+
     cmd = [
-        str(POCKET_TTS_BIN),
+        str(POCKET_TTS_BIN), "generate", "--quiet",
         "--text", text,
         *voice_flag,
         "--output-path", str(out_wav_path)
@@ -305,20 +360,15 @@ def synthesize_speech(text: str, language: str, out_wav_path: Path) -> dict:
 
 def play_audio_on_edge(wav_path: Path) -> bool:
     """Pushes audio payload to S20 FE and plays it aloud via PulseAudio AAudio sink."""
-    remote_wav = f"/sdcard/Download/{wav_path.name}"
-    subprocess.run([
-        "adb", "-H", CONTAINER_IP, "-s", DEVICE_TARGET,
-        "push", str(wav_path), remote_wav
-    ], capture_output=True, check=False)
-    
+    remote_wav = f"/sdcard/Download/{safe_remote_name(wav_path.name)}"
+    subprocess.run(adb_args("push", str(wav_path), remote_wav), capture_output=True, check=False)
+
     # Ensure media volume is at 30%
-    subprocess.run([
-        "adb", "-H", CONTAINER_IP, "-s", DEVICE_TARGET,
-        "shell", "cmd media_session volume --stream 3 --set 5"
-    ], capture_output=True, check=False)
-    
+    subprocess.run(adb_args("shell", "cmd media_session volume --stream 3 --set 5"),
+                   capture_output=True, check=False)
+
     # Play via paplay with dynamic timeout
-    play_cmd = f"timeout 10 paplay {remote_wav}"
+    play_cmd = f"timeout 10 paplay {shlex.quote(remote_wav)}"
     out, dur = run_edge_command(play_cmd, timeout=12)
     return "TIMEOUT" not in out and "ERROR" not in out
 
@@ -356,6 +406,9 @@ def execute_ambient_cycle(
     
     # Step 0: Check Edge Device Thermal State
     temp_c = get_edge_temperature()
+    if temp_c is None:
+        print("🚨 EDGE UNREACHABLE: cannot read S20 FE temperature over ADB. Aborting (fail closed).")
+        return {"status": "aborted_edge_unreachable", "adb_target": f"{CONTAINER_IP} -> {DEVICE_TARGET}"}
     print(f"• Edge Temp  : {temp_c:.1f}°C (Threshold: {MAX_SAFE_TEMP_C}°C)")
     if temp_c >= MAX_SAFE_TEMP_C:
         print(f"🚨 THERMAL CIRCUIT BREAKER: Edge temperature {temp_c:.1f}°C exceeds threshold! Aborting.")
@@ -392,13 +445,9 @@ def execute_ambient_cycle(
     }
     
     # Push edge frame to Termux on S20 FE
-    edge_remote_name = f"edge_frame_{raw_img.stem}.jpg"
-    subprocess.run([
-        "adb", "-H", CONTAINER_IP, "-s", DEVICE_TARGET,
-        "push", str(edge_img_local), f"/sdcard/Download/{edge_remote_name}"
-    ], capture_output=True, check=False)
-    run_edge_command(f"cp /sdcard/Download/{edge_remote_name} {EDGE_TERMUX_HOME}/{edge_remote_name} && chown u0_a356:u0_a356 {EDGE_TERMUX_HOME}/{edge_remote_name} && chmod 644 {EDGE_TERMUX_HOME}/{edge_remote_name}", as_root=True)
-    
+    edge_remote_name = safe_remote_name(f"edge_frame_{raw_img.stem}.jpg")
+    push_frame_to_edge(edge_img_local, edge_remote_name)
+
     # Pass 0: Intent Filter
     is_ocr = detect_ocr_intent(query)
     final_answer = ""
@@ -441,10 +490,8 @@ def execute_ambient_cycle(
         telemetry["steps"].append({"step": "Pass_2_Edge_Critique", "result": p2_res})
         
         # Evaluate Decision
-        p1_up = p1_res["text"].upper()
-        p2_up = p2_res["text"].upper()
-        is_confident = ("YES" in p2_up or "SIM" in p2_up) and not ("UNCLEAR" in p2_up or "NO" in p2_up)
-        
+        is_confident = critique_is_confident(p2_res["text"])
+
         if is_confident and len(p1_res["text"].strip()) > 3:
             print("\n✅ [Resolved at Edge] High confidence verified! Zero homelab egress.")
             telemetry["resolution_tier"] = "Tier 1 (Edge On-Device)"
@@ -494,7 +541,8 @@ def execute_ambient_cycle(
                 
     telemetry["total_latency_sec"] = round(time.time() - cycle_start, 2)
     telemetry["temp_end_c"] = get_edge_temperature()
-    print(f"\n🎉 [Cycle Complete] Total Latency: {telemetry['total_latency_sec']}s | End Temp: {telemetry['temp_end_c']:.1f}°C")
+    end_temp = f"{telemetry['temp_end_c']:.1f}°C" if telemetry["temp_end_c"] is not None else "n/a"
+    print(f"\n🎉 [Cycle Complete] Total Latency: {telemetry['total_latency_sec']}s | End Temp: {end_temp}")
     return telemetry
 
 
