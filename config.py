@@ -44,6 +44,11 @@ EDGE_VOICE_EN = os.getenv(
     "EDGE_VOICE_EN", f"{EDGE_TERMUX_HOME}/voices/voice_profile_user_optionB_full25s.safetensors"
 )
 EDGE_VOICE_PT = os.getenv("EDGE_VOICE_PT", "rafael")
+# Keep the pocket-tts model resident on the phone (about 0.9 GB RAM): a short phrase takes ~2 s
+# instead of ~8 s because torch and the weights are not reloaded on every call.
+TTS_WARM = os.getenv("AMBIENT_TTS_WARM", "1") == "1"
+EDGE_TTS_PORT = int(os.getenv("EDGE_TTS_PORT", "8765"))
+EDGE_TTS_LOG = os.getenv("EDGE_TTS_LOG", f"{EDGE_TERMUX_HOME}/tts-serve.log")
 # Host mode only (the slim container image ships without pocket-tts):
 POCKET_TTS_BIN: Optional[str] = (
     os.getenv("POCKET_TTS_BIN")

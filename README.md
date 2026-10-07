@@ -132,6 +132,7 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | `AMBIENT_RETENTION_DAYS` | `7` | Age after which cached frames/WAVs are deleted |
 | `AMBIENT_TTS_MODE` | `edge` | `edge`: pocket-tts runs on the S20 FE (Termux) and plays via `paplay`; `host`: synthesize locally with `POCKET_TTS_BIN` and push the WAV (dev CLI); `off`: never speak |
 | `EDGE_TTS_BIN` / `EDGE_VOICE_EN` / `EDGE_VOICE_PT` | `pocket-tts` / `~/voices/voice_profile_user_optionB_full25s.safetensors` / `rafael` | Voice backend and profiles inside Termux |
+| `AMBIENT_TTS_WARM` / `EDGE_TTS_PORT` | `1` / `8765` | Keep `pocket-tts serve` resident on the phone (about 0.9 GB RAM, started on demand by the companion). Short phrases take ~2 s instead of ~8 s; `0` uses the per-call CLI |
 | `POCKET_TTS_BIN` | `pocket-tts` on `PATH` | Host mode only (absent in the container) |
 
 ---

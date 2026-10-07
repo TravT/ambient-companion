@@ -164,7 +164,7 @@ class TestEdgeSpeech(unittest.TestCase):
 
     def test_edge_mode_synthesizes_then_plays(self):
         calls, fake = self._edge(["SYNTH_OK", "", ""])
-        with mock.patch.object(config, "TTS_MODE", "edge"), \
+        with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", False), \
                 mock.patch.object(daemon, "run_edge_command", fake), \
                 mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
             res = daemon.speak("It's a \"cup\"; $(id)", "en")
@@ -178,7 +178,7 @@ class TestEdgeSpeech(unittest.TestCase):
 
     def test_edge_pt_uses_builtin_voice(self):
         calls, fake = self._edge(["SYNTH_OK", "", ""])
-        with mock.patch.object(config, "TTS_MODE", "edge"), \
+        with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", False), \
                 mock.patch.object(daemon, "run_edge_command", fake), \
                 mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
             daemon.speak("ola", "pt")
@@ -187,12 +187,49 @@ class TestEdgeSpeech(unittest.TestCase):
 
     def test_edge_synthesis_failure_skips_playback(self):
         calls, fake = self._edge(["Traceback: boom"])
-        with mock.patch.object(config, "TTS_MODE", "edge"), \
+        with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", False), \
                 mock.patch.object(daemon, "run_edge_command", fake):
             res = daemon.speak("hello", "en")
         self.assertEqual(res["status"], "error")
         self.assertFalse(res["played"])
         self.assertEqual(len(calls), 1)
+
+    def test_warm_server_path_posts_text_literally(self):
+        # SERVER_UP, then the curl synthesis, then playback, then cleanup.
+        calls, fake = self._edge(["UP", "SYNTH_OK", "", ""])
+        nasty = "@/etc/passwd <x> $(id) 'q'"
+        with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", True), \
+                mock.patch.object(daemon, "run_edge_command", fake), \
+                mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            res = daemon.speak(nasty, "en")
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(res["where"], "s20-warm")
+        self.assertIn("pocket-tts serve", calls[0])          # started on demand when /health is down
+        self.assertIn("--default-voice", calls[0])
+        synth = shlex.split(calls[1])
+        self.assertIn("--form-string", synth)                # never -F: curl would read "@file" / "<file"
+        self.assertEqual(synth[synth.index("--form-string") + 1], "text=" + nasty)
+        self.assertNotIn("voice_url", calls[1])               # English uses the server's default profile
+        self.assertIn("paplay", calls[2])
+
+    def test_warm_server_pt_selects_builtin_voice_per_request(self):
+        calls, fake = self._edge(["UP", "SYNTH_OK", "", ""])
+        with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", True), \
+                mock.patch.object(daemon, "run_edge_command", fake), \
+                mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            daemon.speak("ola", "pt")
+        self.assertIn("voice_url=rafael", calls[1])
+
+    def test_warm_failure_falls_back_to_cli(self):
+        # server never comes up -> per-call CLI still speaks
+        calls, fake = self._edge(["DOWN", "SYNTH_OK", "", ""])
+        with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", True), \
+                mock.patch.object(daemon, "run_edge_command", fake), \
+                mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            res = daemon.speak("hello", "en")
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(res["where"], "s20")
+        self.assertIn("pocket-tts generate", calls[1])
 
     def test_off_mode_does_nothing(self):
         with mock.patch.object(config, "TTS_MODE", "off"), \

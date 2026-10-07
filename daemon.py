@@ -384,21 +384,58 @@ def tts_available() -> bool:
     return out.startswith("/")
 
 
+def ensure_edge_tts_server() -> bool:
+    """Make sure `pocket-tts serve` is answering on the phone, starting it when it is down."""
+    port = config.EDGE_TTS_PORT
+    health = f"curl -fsS -m 2 http://127.0.0.1:{port}/health >/dev/null 2>&1"
+    start = (
+        f"HF_HUB_DISABLE_XET=1 nohup {shlex.quote(config.EDGE_TTS_BIN)} serve --host 127.0.0.1 "
+        f"--port {port} --default-voice {shlex.quote(config.EDGE_VOICE_EN)} --quantize "
+        f"> {shlex.quote(config.EDGE_TTS_LOG)} 2>&1 < /dev/null &"
+    )
+    cmd = (
+        f"{health} || {{ {start} for i in $(seq 1 40); do {health} && break; sleep 1; done; }}; "
+        f"{health} && echo UP || echo DOWN"
+    )
+    out, _ = run_edge_command(cmd, timeout=60)
+    lines = out.strip().splitlines()
+    return bool(lines) and lines[-1].strip() == "UP"
+
+
+def _warm_synth_command(text: str, language: str, remote_wav: str) -> str:
+    """curl against the resident server. --form-string keeps "@file" / "<file" in text literal."""
+    argv = ["curl", "-sS", "-m", "90", "-X", "POST", f"http://127.0.0.1:{config.EDGE_TTS_PORT}/tts",
+            "--form-string", f"text={text}"]
+    if language != "en":
+        argv += ["--form-string", f"voice_url={config.EDGE_VOICE_PT}"]
+    quoted = " ".join(shlex.quote(a) for a in argv)
+    return f"{quoted} -o {shlex.quote(remote_wav)} && test -s {shlex.quote(remote_wav)} && echo SYNTH_OK"
+
+
 def speak_on_edge(text: str, language: str) -> dict:
-    """Synthesize with pocket-tts in Termux on the S20 FE and play it through paplay."""
+    """Synthesize with pocket-tts on the S20 FE (resident server, CLI as fallback) and play it with paplay."""
     voice = config.EDGE_VOICE_EN if language == "en" else config.EDGE_VOICE_PT
     remote_wav = f"{EDGE_TERMUX_HOME}/tts_{int(time.time() * 1000)}.wav"
-    # HF_HUB_DISABLE_XET: the Rust hf_xet downloader is not built in Termux; plain HTTP works.
-    synth = (
-        f"HF_HUB_DISABLE_XET=1 {shlex.quote(config.EDGE_TTS_BIN)} generate --quiet --text {shlex.quote(text)} "
-        f"--voice {shlex.quote(voice)} --output-path {shlex.quote(remote_wav)} "
-        f"&& test -s {shlex.quote(remote_wav)} && echo SYNTH_OK"
-    )
-    out, synth_dur = run_edge_command(synth, timeout=90)
-    if "SYNTH_OK" not in out:
-        return {"status": "error", "played": False, "language": language,
-                "duration_sec": round(synth_dur, 2),
-                "error": (out or "no output from pocket-tts on the S20")[-300:]}
+    t0 = time.time()
+    where = None
+    out = ""
+    if config.TTS_WARM and ensure_edge_tts_server():
+        out, _ = run_edge_command(_warm_synth_command(text, language, remote_wav), timeout=90)
+        where = "s20-warm" if "SYNTH_OK" in out else None
+    if where is None:
+        # HF_HUB_DISABLE_XET: the Rust hf_xet downloader is not built in Termux; plain HTTP works.
+        synth = (
+            f"HF_HUB_DISABLE_XET=1 {shlex.quote(config.EDGE_TTS_BIN)} generate --quiet --text {shlex.quote(text)} "
+            f"--voice {shlex.quote(voice)} --output-path {shlex.quote(remote_wav)} "
+            f"&& test -s {shlex.quote(remote_wav)} && echo SYNTH_OK"
+        )
+        out, _ = run_edge_command(synth, timeout=90)
+        if "SYNTH_OK" not in out:
+            return {"status": "error", "played": False, "language": language,
+                    "duration_sec": round(time.time() - t0, 2),
+                    "error": (out or "no output from pocket-tts on the S20")[-300:]}
+        where = "s20"
+    synth_dur = time.time() - t0
 
     subprocess.run(adb_args("shell", "cmd media_session volume --stream 3 --set 5"),
                    capture_output=True, check=False)
@@ -406,7 +443,7 @@ def speak_on_edge(text: str, language: str) -> dict:
     played = "TIMEOUT" not in play_out and "ERROR" not in play_out
     run_edge_command(f"rm -f {shlex.quote(remote_wav)}", timeout=10)
     return {"status": "success", "played": played, "language": language,
-            "duration_sec": round(synth_dur, 2), "where": "s20"}
+            "duration_sec": round(synth_dur, 2), "where": where}
 
 
 def speak(text: str, language: str) -> dict:
