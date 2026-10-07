@@ -2,6 +2,7 @@
 """
 HTTP front-end for the ambient companion (PRJ-12 / ADR-42).
 
+  GET  /        service index (route probes)
   GET  /health  liveness only, never touches ADB (used by Nomad check_restart)
   GET  /ready   live ADB / thermal / llama-server / TTS state as JSON
   POST /mcp     one JSON-RPC 2.0 request (same tools as the stdio server), bearer-token protected
@@ -40,7 +41,10 @@ def _make_handler(token: str):
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path == "/health":
+            if self.path == "/":
+                self._send(200, {"service": server.SERVER_NAME, "version": server.SERVER_VERSION,
+                                 "endpoints": ["/health", "/ready", "POST /mcp"]})
+            elif self.path == "/health":
                 self._send(200, {"status": "ok", "version": server.SERVER_VERSION})
             elif self.path == "/ready":
                 self._send(200, server.readiness())

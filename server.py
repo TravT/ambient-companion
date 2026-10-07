@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.1.0"
+SERVER_VERSION = "2.2.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -76,7 +76,7 @@ def readiness() -> dict:
         "battery_level": battery,
         "thermal_breaker": temp_c is not None and temp_c >= daemon.MAX_SAFE_TEMP_C,
         "llama_server": llama_ok,
-        "tts_available": bool(daemon.POCKET_TTS_BIN),
+        "tts_available": daemon.tts_available(),
     }
 
 
@@ -341,20 +341,19 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         elif tool_name == "ambient_speak":
             text = arguments.get("text", "")
             lang = arguments.get("language", "en")
-            
-            timestamp = int(time.time())
-            wav_path = daemon.BENCHMARK_DIR / f"mcp_speech_{timestamp}.wav"
-            tts_res = daemon.synthesize_speech(text, lang, wav_path)
-            
-            played = False
-            if tts_res.get("status") == "success":
-                played = daemon.play_audio_on_edge(wav_path)
-                
+
+            speech = daemon.speak(text, lang)
+            if speech.get("status") == "success":
+                outcome = "Success" if speech.get("played") else "Synthesized but playback failed"
+            elif speech.get("status") == "disabled":
+                outcome = "Voice is disabled (AMBIENT_TTS_MODE=off)"
+            else:
+                outcome = f"Failed: {speech.get('error', 'unknown error')}"
             return {
                 "content": [
                     {
                         "type": "text",
-                        "text": f"Speech Playback Status:\n- Text: \"{text}\"\n- Language: {lang}\n- Synthesized in: {tts_res.get('duration_sec', 0)}s\n- S20 FE Speaker Playback: {'Success' if played else 'Failed'}"
+                        "text": f"Speech Playback Status:\n- Text: \"{text}\"\n- Language: {lang}\n- Synthesized in: {speech.get('duration_sec', 0)}s\n- S20 FE Speaker Playback: {outcome}"
                     }
                 ]
             }
@@ -371,7 +370,7 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 f"- ADB Gateway: {'CONNECTED' if r['adb'] else 'UNREACHABLE'} "
                 f"({daemon.CONTAINER_IP} -> {daemon.DEVICE_TARGET})\n"
                 f"- Homelab llama-server: {'HEALTHY (200 OK)' if r['llama_server'] else 'UNHEALTHY / OFFLINE'}\n"
-                f"- Voice (pocket-tts): {'available' if r['tts_available'] else 'not installed in this runtime'}"
+                f"- Voice (pocket-tts, mode {config.TTS_MODE}): {'available' if r['tts_available'] else 'unavailable (not installed on the S20, or disabled)'}"
             )
             return {
                 "content": [{"type": "text", "text": status_report}]

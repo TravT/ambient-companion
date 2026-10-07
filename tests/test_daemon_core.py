@@ -150,6 +150,68 @@ class TestTts(unittest.TestCase):
         self.assertEqual(captured["argv"][:2], ["/usr/bin/pocket-tts", "generate"])
 
 
+class TestEdgeSpeech(unittest.TestCase):
+    """Voice runs on the S20 FE: pocket-tts generate in Termux, then paplay."""
+
+    def _edge(self, outputs):
+        calls = []
+
+        def fake_edge(cmd, timeout=45, as_root=False):
+            calls.append(cmd)
+            return outputs.pop(0), 0.5
+
+        return calls, fake_edge
+
+    def test_edge_mode_synthesizes_then_plays(self):
+        calls, fake = self._edge(["SYNTH_OK", "", ""])
+        with mock.patch.object(config, "TTS_MODE", "edge"), \
+                mock.patch.object(daemon, "run_edge_command", fake), \
+                mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            res = daemon.speak("It's a \"cup\"; $(id)", "en")
+        self.assertEqual(res["status"], "success")
+        self.assertTrue(res["played"])
+        self.assertIn("pocket-tts generate", calls[0])
+        self.assertIn("paplay", calls[1])
+        argv = shlex.split(calls[0].split(" && ")[0])
+        self.assertIn("It's a \"cup\"; $(id)", argv)          # text survives quoting intact
+        self.assertTrue(argv[argv.index("--voice") + 1].endswith(".safetensors"))
+
+    def test_edge_pt_uses_builtin_voice(self):
+        calls, fake = self._edge(["SYNTH_OK", "", ""])
+        with mock.patch.object(config, "TTS_MODE", "edge"), \
+                mock.patch.object(daemon, "run_edge_command", fake), \
+                mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            daemon.speak("ola", "pt")
+        argv = shlex.split(calls[0].split(" && ")[0])
+        self.assertEqual(argv[argv.index("--voice") + 1], "rafael")
+
+    def test_edge_synthesis_failure_skips_playback(self):
+        calls, fake = self._edge(["Traceback: boom"])
+        with mock.patch.object(config, "TTS_MODE", "edge"), \
+                mock.patch.object(daemon, "run_edge_command", fake):
+            res = daemon.speak("hello", "en")
+        self.assertEqual(res["status"], "error")
+        self.assertFalse(res["played"])
+        self.assertEqual(len(calls), 1)
+
+    def test_off_mode_does_nothing(self):
+        with mock.patch.object(config, "TTS_MODE", "off"), \
+                mock.patch.object(daemon, "run_edge_command", side_effect=AssertionError("touched edge")):
+            res = daemon.speak("hello", "en")
+        self.assertEqual(res["status"], "disabled")
+        self.assertFalse(res["played"])
+
+    def test_tts_available_edge_checks_binary_on_phone(self):
+        with mock.patch.object(config, "TTS_MODE", "edge"), \
+                mock.patch.object(daemon, "run_edge_command", return_value=("/data/x/usr/bin/pocket-tts", 0.1)):
+            self.assertTrue(daemon.tts_available())
+        with mock.patch.object(config, "TTS_MODE", "edge"), \
+                mock.patch.object(daemon, "run_edge_command", return_value=("ERROR: adb", 0.1)):
+            self.assertFalse(daemon.tts_available())
+        with mock.patch.object(config, "TTS_MODE", "off"):
+            self.assertFalse(daemon.tts_available())
+
+
 class TestAllowedDirs(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

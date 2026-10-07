@@ -66,12 +66,12 @@ else
     echo "not running (deploy below)"
 fi
 
-step "[5/5] English voice profile..."
-VOICE="${VOICE_PROFILE_EN:-${REPO_ROOT}/data/media/merged/vision/benchmark/voice_profile_user_optionB_full25s.safetensors}"
-if [ -f "$VOICE" ]; then
-    ok "$(du -h "$VOICE" | cut -f1)"
+step "[5/5] Voice on the S20 (pocket-tts + English profile)..."
+TERMUX_HOME=/data/data/com.termux/files/home
+if adb -H "$ADB_HOST" -s "$DEVICE" shell "su -c 'test -x /data/data/com.termux/files/usr/bin/pocket-tts && test -s $TERMUX_HOME/voices/voice_profile_user_optionB_full25s.safetensors'" >/dev/null 2>&1; then
+    ok "pocket-tts and profile present"
 else
-    warn "missing ${VOICE} (re-create with: pocket-tts export-voice <recording.wav> <out.safetensors>)"
+    warn "pocket-tts or the English profile is missing on the S20 (run setup_edge_s20.sh in Termux; export the profile with: HF_TOKEN=<vault_hf_token> pocket-tts export-voice <recording.wav> <out.safetensors>, then adb push it to ~/voices/)"
 fi
 
 if [ "$DEV" = "1" ]; then

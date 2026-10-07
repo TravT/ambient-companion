@@ -76,7 +76,7 @@ dev/ambient-companion/
 | Target | Runs | How it is installed |
 | :--- | :--- | :--- |
 | **Dell (homelab)** | The containerized service (HTTP + MCP, ADB client, calls Tier 2 llama-server) | Nomad job via Ansible `--tags docker` |
-| **S20 FE** | Camera, SmolVLM triage, speaker (native Termux) | `setup_edge_s20.sh` |
+| **S20 FE** | Camera, SmolVLM triage, voice synthesis (pocket-tts) and speaker (native Termux) | `setup_edge_s20.sh` |
 | **Windows / other desktops** | Client only | `setup_windows.bat` |
 
 ---
@@ -112,7 +112,7 @@ bash setup_edge_s20.sh
   }
 }
 ```
-**Remote clients (HTTP):** `POST http://ambient.home.arpa/mcp` with `Authorization: Bearer $AMBIENT_API_TOKEN` and one JSON-RPC 2.0 request per call (`tools/list`, `tools/call`, ...). `GET /health` is liveness only; `GET /ready` reports ADB, edge temperature, battery, llama-server and voice availability.
+**Remote clients (HTTP):** `POST http://ambient.home.arpa/mcp` with `Authorization: Bearer $AMBIENT_API_TOKEN` and one JSON-RPC 2.0 request per call (`tools/list`, `tools/call`, ...). `GET /` is a service index, `GET /health` is liveness only, and `GET /ready` reports ADB, edge temperature, battery, llama-server and voice availability.
 
 ### Step D: Windows client
 Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arpa/health`). Set `AMBIENT_API_TOKEN` in your user environment.
@@ -130,7 +130,9 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | `AMBIENT_HOST` / `AMBIENT_PORT` | `127.0.0.1` / `8089` | HTTP listener |
 | `AMBIENT_API_TOKEN` | empty (auth off) | Bearer token for `POST /mcp` |
 | `AMBIENT_RETENTION_DAYS` | `7` | Age after which cached frames/WAVs are deleted |
-| `POCKET_TTS_BIN` | `pocket-tts` on `PATH` | Voice synthesis binary (absent in the slim image; speech is skipped with a clear error) |
+| `AMBIENT_TTS_MODE` | `edge` | `edge`: pocket-tts runs on the S20 FE (Termux) and plays via `paplay`; `host`: synthesize locally with `POCKET_TTS_BIN` and push the WAV (dev CLI); `off`: never speak |
+| `EDGE_TTS_BIN` / `EDGE_VOICE_EN` / `EDGE_VOICE_PT` | `pocket-tts` / `~/voices/voice_profile_user_optionB_full25s.safetensors` / `rafael` | Voice backend and profiles inside Termux |
+| `POCKET_TTS_BIN` | `pocket-tts` on `PATH` | Host mode only (absent in the container) |
 
 ---
 
@@ -205,6 +207,6 @@ python3 dev/ambient-companion/daemon.py \
 ## 8. Containerization, GHCR Releases & Image Pinning
 
 1. **Image**: `Dockerfile` builds a slim, non-root (`uid 1000`) service on `python:3.12-slim` with `adb` and `ffmpeg`. No `raw_exec` or privileges are needed. Voice synthesis is not baked in (`--build-arg WITH_TTS=1` adds pocket-tts and needs far more memory).
-2. **CI**: `.github/workflows/docker-publish.yml` runs the unit tests, then builds and pushes `ghcr.io/travt/ambient-companion` tagged `sha-<short>` on every main build and `vX.Y.Z` on release tags (plus the moving `latest`/`main` tags, which the cluster never pins).
+2. **CI**: `.github/workflows/docker-publish.yml` runs the unit tests, then builds and pushes `ghcr.io/travt/ambient-companion` tagged `sha-<short>` on every main build and `X.Y.Z` (no `v`) on release tags (plus the moving `latest`/`main` tags, which the cluster never pins).
 3. **Nomad job**: `nomad_jobs/ambient-companion.nomad` in the cluster repo runs it with an HTTP `/health` check, a Traefik route and a Tailscale-safe loopback bind.
 4. **Pinning (ADR-47)**: the job pins `ghcr.io/travt/ambient-companion:<version tag>@sha256:<digest>`. Read the digest from the registry (`docker buildx imagetools inspect ghcr.io/travt/ambient-companion:<tag>`), never type it. Renovate (`"own images"` rule) bumps tag and digest together.

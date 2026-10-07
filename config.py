@@ -34,7 +34,17 @@ FALLBACK_LLAMA_SERVER_URL = os.getenv(
 )
 VLM_MODEL = os.getenv("VLM_MODEL", "qwen2.5vl:3b")
 
-# --- Voice (optional: the slim container image ships without pocket-tts) ---
+# --- Voice ---
+# edge: pocket-tts runs on the S20 FE (Termux) and plays through paplay (default, PRJ-12 Phase 10)
+# host: synthesize here with POCKET_TTS_BIN, push the WAV to the phone (dev CLI on the Dell)
+# off:  never speak
+TTS_MODE = os.getenv("AMBIENT_TTS_MODE", "edge").lower()
+EDGE_TTS_BIN = os.getenv("EDGE_TTS_BIN", "pocket-tts")
+EDGE_VOICE_EN = os.getenv(
+    "EDGE_VOICE_EN", f"{EDGE_TERMUX_HOME}/voices/voice_profile_user_optionB_full25s.safetensors"
+)
+EDGE_VOICE_PT = os.getenv("EDGE_VOICE_PT", "rafael")
+# Host mode only (the slim container image ships without pocket-tts):
 POCKET_TTS_BIN: Optional[str] = (
     os.getenv("POCKET_TTS_BIN")
     or shutil.which("pocket-tts")

@@ -182,6 +182,11 @@ class TestHttp(HttpCase):
                                  {"Authorization": f"Bearer {self.TOKEN}"})
         self.assertEqual(status, 202)
 
+    def test_root_index_is_200_for_route_probes(self):
+        status, body = self.request("/")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["service"], "ambient-companion")
+
     def test_unknown_path_is_404(self):
         status, _ = self.request("/nope")
         self.assertEqual(status, 404)

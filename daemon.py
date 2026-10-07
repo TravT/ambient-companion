@@ -373,6 +373,55 @@ def play_audio_on_edge(wav_path: Path) -> bool:
     return "TIMEOUT" not in out and "ERROR" not in out
 
 
+def tts_available() -> bool:
+    """True when the configured voice backend can speak right now."""
+    mode = config.TTS_MODE
+    if mode == "off":
+        return False
+    if mode == "host":
+        return bool(POCKET_TTS_BIN)
+    out, _ = run_edge_command(f"command -v {shlex.quote(config.EDGE_TTS_BIN)}", timeout=10)
+    return out.startswith("/")
+
+
+def speak_on_edge(text: str, language: str) -> dict:
+    """Synthesize with pocket-tts in Termux on the S20 FE and play it through paplay."""
+    voice = config.EDGE_VOICE_EN if language == "en" else config.EDGE_VOICE_PT
+    remote_wav = f"{EDGE_TERMUX_HOME}/tts_{int(time.time() * 1000)}.wav"
+    # HF_HUB_DISABLE_XET: the Rust hf_xet downloader is not built in Termux; plain HTTP works.
+    synth = (
+        f"HF_HUB_DISABLE_XET=1 {shlex.quote(config.EDGE_TTS_BIN)} generate --quiet --text {shlex.quote(text)} "
+        f"--voice {shlex.quote(voice)} --output-path {shlex.quote(remote_wav)} "
+        f"&& test -s {shlex.quote(remote_wav)} && echo SYNTH_OK"
+    )
+    out, synth_dur = run_edge_command(synth, timeout=90)
+    if "SYNTH_OK" not in out:
+        return {"status": "error", "played": False, "language": language,
+                "duration_sec": round(synth_dur, 2),
+                "error": (out or "no output from pocket-tts on the S20")[-300:]}
+
+    subprocess.run(adb_args("shell", "cmd media_session volume --stream 3 --set 5"),
+                   capture_output=True, check=False)
+    play_out, _ = run_edge_command(f"timeout 15 paplay {shlex.quote(remote_wav)}", timeout=20)
+    played = "TIMEOUT" not in play_out and "ERROR" not in play_out
+    run_edge_command(f"rm -f {shlex.quote(remote_wav)}", timeout=10)
+    return {"status": "success", "played": played, "language": language,
+            "duration_sec": round(synth_dur, 2), "where": "s20"}
+
+
+def speak(text: str, language: str) -> dict:
+    """Speak `text` according to AMBIENT_TTS_MODE (edge | host | off)."""
+    mode = config.TTS_MODE
+    if mode == "off":
+        return {"status": "disabled", "played": False, "language": language}
+    if mode == "host":
+        wav = BENCHMARK_DIR / f"ambient_speech_{int(time.time() * 1000)}.wav"
+        res = synthesize_speech(text, language, wav)
+        res["played"] = bool(res.get("status") == "success" and play_audio_on_edge(wav))
+        return res
+    return speak_on_edge(text, language)
+
+
 def execute_ambient_cycle(
     query: str,
     source: str = "camera",
@@ -525,20 +574,13 @@ def execute_ambient_cycle(
         sentences = re.split(r"(?<=[.!?])\s+", clean_speech)
         speech_text = " ".join(sentences[:2]) if len(sentences) > 2 else clean_speech
         
-        timestamp = int(time.time())
-        out_wav = BENCHMARK_DIR / f"ambient_resp_{timestamp}.wav"
-        print(f"\n🎵 [Voice Synthesis] Synthesizing speech via Pocket-TTS ({lang.upper()})...")
+        print(f"\n🎵 [Voice] Speaking via Pocket-TTS ({lang.upper()}, mode={config.TTS_MODE})...")
         print(f"   Speech Prompt: \"{speech_text}\"")
-        tts_res = synthesize_speech(speech_text, lang, out_wav)
-        telemetry["steps"].append({"step": "Pocket_TTS_Synthesis", "result": tts_res})
-        
-        if tts_res.get("status") == "success":
-            print(f"\n🔊 [Edge Speaker] Dispatching audio to Galaxy S20 FE hardware speaker...")
-            play_ok = play_audio_on_edge(out_wav)
-            telemetry["steps"].append({"step": "Edge_Audio_Playback", "played": play_ok})
-            if play_ok:
-                print("   ✓ Hardware audio playback confirmed at ~30% volume.")
-                
+        speech = speak(speech_text, lang)
+        telemetry["steps"].append({"step": "Speech", "result": speech})
+        if speech.get("played"):
+            print("   ✓ Spoken on the S20 FE at ~30% volume.")
+
     telemetry["total_latency_sec"] = round(time.time() - cycle_start, 2)
     telemetry["temp_end_c"] = get_edge_temperature()
     end_temp = f"{telemetry['temp_end_c']:.1f}°C" if telemetry["temp_end_c"] is not None else "n/a"
