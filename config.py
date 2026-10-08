@@ -50,6 +50,9 @@ SCENE_PX = int(os.getenv("AMBIENT_SCENE_PX", "512"))
 # image is resized before the model sees it, which the grounding coordinates are relative to.
 VLM_IMAGE_MIN_TOKENS = int(os.getenv("VLM_IMAGE_MIN_TOKENS", "256"))
 READ_PX = int(os.getenv("AMBIENT_READ_PX", "768"))
+# Locate questions (boxes, click targets) need the full 1024 px: measured click error on a mock page with known
+# positions was 7-60 px at 512, 10-173 px at 768 and 0-6 px at 1024.
+GROUND_PX = int(os.getenv("AMBIENT_GROUND_PX", "1024"))
 
 # --- Voice ---
 # edge: pocket-tts runs on the S20 FE (Termux) and plays through paplay (default, PRJ-12 Phase 10)

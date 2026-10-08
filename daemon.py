@@ -333,7 +333,9 @@ def plan_route(query: str, crop_bbox: Optional[List[int]] = None) -> dict:
         return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": 1024}
     if kind == "ocr":
         return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": config.READ_PX}
-    if kind in ("locate", "describe"):
+    if kind == "locate":
+        return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": config.GROUND_PX}
+    if kind == "describe":
         return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": config.SCENE_PX}
     return {"kind": kind, "backend": "edge", "tier2_backend": best, "tier2_px": config.SCENE_PX}
 

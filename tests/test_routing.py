@@ -142,10 +142,17 @@ class TestPlanRoute(unittest.TestCase):
             p = self.plan(q, gpu=True)
             self.assertEqual((p["backend"], p["tier2_px"]), ("gpu", 1024), q)
 
-    def test_describe_and_locate_go_to_homelab_at_512(self):
-        for q in ("What is on the desk?", "Where is the remote?"):
-            p = self.plan(q)
-            self.assertEqual((p["backend"], p["tier2_px"]), ("homelab", 512), q)
+    def test_describe_goes_to_homelab_at_512(self):
+        p = self.plan("What is on the desk?")
+        self.assertEqual((p["backend"], p["tier2_px"]), ("homelab", 512))
+
+    def test_locate_needs_the_full_1024_px_for_accurate_boxes(self):
+        # Measured 2026-10-08 on a mock page: click error 7-60 px at 512, 10-173 at 768, 0-6 at 1024.
+        for q in ("Where is the remote?", "Locate the Sign in button"):
+            for sat in (False, True):
+                p = self.plan(q, satellite=sat)
+                self.assertEqual(p["tier2_px"], config.GROUND_PX, q)
+        self.assertEqual(config.GROUND_PX, 1024)
 
     def test_reading_uses_the_read_budget(self):
         p = self.plan("Read the dosage")

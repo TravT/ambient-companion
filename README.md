@@ -22,7 +22,8 @@ flowchart TD
     C -->|"clear yes/no"| F["Resolved at the edge\n(0 homelab CPU)"]
     C -->|"empty / hedged / not a yes-no"| H
 
-    R -->|"describe, locate"| H["Tier 2: satellite if awake, else the Dell CPU\nQwen2.5-VL-3B, 512 px (~14 s / ~30 s)"]
+    R -->|"describe"| H["Tier 2: satellite if awake, else the Dell CPU\nQwen2.5-VL-3B, 512 px (~14 s / ~20-30 s)"]
+    R -->|"locate (boxes, click targets)"| H4["Tier 2 at 1024 px for accurate boxes\n(~45 s satellite / ~100 s Dell)"]
     R -->|"reading / OCR"| H2["Tier 2 on the Dell CPU\n768 px (~55 s)"]
     R -->|"crop_bbox given"| H3["Tier 2 on the Dell CPU\nnative-resolution crop, <=1024 px"]
 
@@ -32,6 +33,7 @@ flowchart TD
     GPU --> I
     SAT --> I
     H --> I
+    H4 --> I
     H2 --> I
     H3 --> I
     I --> J["S20 speaker via paplay"]
@@ -136,7 +138,7 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | `AMBIENT_API_TOKEN` | empty (auth off) | Bearer token for `POST /mcp` |
 | `SATELLITE_LLAMA_SERVER_URL` | `http://100.105.6.62:8090/v1/chat/completions` | MateBook satellite llama-server (`satellite_vlm` Ansible role, tailnet only, about 2x the Dell). Probed with `/health`, never woken; `""` disables |
 | `AMBIENT_PREFER_GPU` / `AMBIENT_GPU_PROBE_TTL` | `1` / `15` | Use the RTX 5070 desktop first when its `/health` answers (probed, never woken); probe cache in seconds |
-| `AMBIENT_SCENE_PX` / `AMBIENT_READ_PX` | `512` / `768` | Longest side sent to the Dell for scenes and for reading (crops go up to 1024; the GPU always gets 1024) |
+| `AMBIENT_SCENE_PX` / `AMBIENT_READ_PX` / `AMBIENT_GROUND_PX` | `512` / `768` / `1024` | Longest side sent to Tier 2 for scenes, for reading and for locate questions (crops go up to 1024; the GPU always gets 1024). Locate needs 1024: click error was 7-60 px at 512, 10-173 px at 768 and 0-6 px at 1024 |
 | `AMBIENT_RETENTION_DAYS` | `7` | Age after which cached frames/WAVs are deleted |
 | `AMBIENT_TTS_MODE` | `edge` | `edge`: pocket-tts runs on the S20 FE (Termux) and plays via `paplay`; `host`: synthesize locally with `POCKET_TTS_BIN` and push the WAV (dev CLI); `off`: never speak |
 | `EDGE_TTS_BIN` / `EDGE_VOICE_EN` / `EDGE_VOICE_PT` | `pocket-tts` / `~/voices/voice_profile_user_optionB_full25s.safetensors` / `rafael` | Voice backend and profiles inside Termux |
