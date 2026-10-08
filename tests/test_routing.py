@@ -32,6 +32,15 @@ class TestClassify(unittest.TestCase):
         self.check("locate", "Where is the remote?", "Locate the keyboard with bounding boxes",
                    "Onde está o controle?")
 
+    def test_locate_wins_over_incidental_reading_words(self):
+        # "text" / "label" name the thing being found; they are not a request to read it.
+        self.check("locate", "Where is the Username text input field?", "Where is the label?",
+                   "Where is the 'Forgot password?' link?", "Onde está o texto de erro?")
+
+    def test_reading_verbs_still_win_over_locate(self):
+        self.check("ocr", "Read the label", "Where can I read the dosage?", "Transcribe the text",
+                   "Leia o rótulo", "What does the label say?")
+
     def test_describe(self):
         self.check("describe", "What is on the desk?", "Describe the scene.", "O que tem na mesa?",
                    "How many cups are there?")

@@ -168,6 +168,7 @@ def detect_ocr_intent(query: str) -> bool:
     return any(re.search(p, q) for p in patterns)
 
 
+_READ_VERB_RE = re.compile(r"\b(read|transcribe|ocr|leia|transcreva|ler)\b", re.IGNORECASE)
 _LOCATE_RE = re.compile(r"\b(where|locate|bounding|bbox|onde|localiz\w*)\b", re.IGNORECASE)
 _PRESENCE_RE = re.compile(
     r"^\s*(is|are|was|were|do|does|did|can|could|has|have|any|tem|t[eê]m|h[aá]|existe|existem|est[aá]|voc[eê] v[eê])\b",
@@ -182,10 +183,12 @@ _YESNO_RE = re.compile(r"\b(yes|no|sim|n[aã]o)\b", re.IGNORECASE)
 
 def classify_query(query: str) -> str:
     """Question shape: ocr | locate | presence (yes/no) | describe. Decides the tier, not a model."""
+    if _READ_VERB_RE.search(query):
+        return "ocr"
+    if _LOCATE_RE.search(query):          # "Where is the Username text input field?" is a locate, not a read
+        return "locate"
     if detect_ocr_intent(query):
         return "ocr"
-    if _LOCATE_RE.search(query):
-        return "locate"
     if _PRESENCE_RE.search(query):
         return "presence"
     return "describe"

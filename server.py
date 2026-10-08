@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.4.2"
+SERVER_VERSION = "2.4.3"
 PROTOCOL_VERSION = "2024-11-05"
 
 
