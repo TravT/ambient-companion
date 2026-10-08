@@ -48,43 +48,93 @@ class TestNeedsEscalation(unittest.TestCase):
             self.assertTrue(daemon.needs_escalation(text), text)
 
 
-class TestGpuProbe(unittest.TestCase):
+class TestBackendLadder(unittest.TestCase):
     def setUp(self):
-        daemon._gpu_probe = (0.0, False)
+        daemon._probe_cache.clear()
 
     def test_awake_when_health_is_200(self):
         with mock.patch.object(daemon.requests, "get", return_value=mock.Mock(status_code=200)) as get:
-            self.assertTrue(daemon.gpu_awake())
+            self.assertTrue(daemon.backend_up("gpu"))
         self.assertTrue(get.call_args.args[0].endswith("/health"))
         self.assertIn("100.77.169.15", get.call_args.args[0])
 
+    def test_satellite_probe_uses_its_own_url(self):
+        with mock.patch.object(daemon.requests, "get", return_value=mock.Mock(status_code=200)) as get:
+            self.assertTrue(daemon.backend_up("satellite"))
+        self.assertIn("100.105.6.62:8090", get.call_args.args[0])
+
     def test_asleep_when_unreachable_and_never_raises(self):
         with mock.patch.object(daemon.requests, "get", side_effect=OSError("down")):
-            self.assertFalse(daemon.gpu_awake())
+            self.assertFalse(daemon.backend_up("gpu"))
+            self.assertFalse(daemon.backend_up("satellite"))
 
-    def test_result_is_cached_briefly(self):
+    def test_result_is_cached_per_backend(self):
         with mock.patch.object(daemon.requests, "get", return_value=mock.Mock(status_code=200)) as get:
-            daemon.gpu_awake()
-            daemon.gpu_awake()
-        self.assertEqual(get.call_count, 1)
+            daemon.backend_up("gpu")
+            daemon.backend_up("gpu")
+            daemon.backend_up("satellite")
+        self.assertEqual(get.call_count, 2)
 
-    def test_prefer_gpu_off_never_probes(self):
+    def test_prefer_gpu_off_never_probes_the_gpu(self):
         with mock.patch.object(config, "PREFER_GPU", False), \
                 mock.patch.object(daemon.requests, "get", side_effect=AssertionError("probed")):
-            self.assertFalse(daemon.gpu_awake())
+            self.assertFalse(daemon.backend_up("gpu"))
 
-    def test_endpoints_put_gpu_first_only_when_awake(self):
-        with mock.patch.object(daemon, "gpu_awake", return_value=True):
-            eps = daemon.tier2_endpoints()
-        self.assertEqual(eps[0], daemon.FALLBACK_LLAMA_SERVER_URL)
-        self.assertEqual(eps[1], daemon.LLAMA_SERVER_URL)
-        with mock.patch.object(daemon, "gpu_awake", return_value=False):
+    def test_unset_satellite_url_disables_it(self):
+        with mock.patch.object(daemon, "SATELLITE_LLAMA_SERVER_URL", ""), \
+                mock.patch.object(daemon.requests, "get", side_effect=AssertionError("probed")):
+            self.assertFalse(daemon.backend_up("satellite"))
+
+    def _up(self, **state):
+        return mock.patch.object(daemon, "backend_up", side_effect=lambda name: state.get(name, False))
+
+    def test_endpoints_order_gpu_satellite_dell(self):
+        with self._up(gpu=True, satellite=True):
+            self.assertEqual(daemon.tier2_endpoints(), [
+                daemon.FALLBACK_LLAMA_SERVER_URL, daemon.SATELLITE_LLAMA_SERVER_URL, daemon.LLAMA_SERVER_URL])
+        with self._up(satellite=True):
+            self.assertEqual(daemon.tier2_endpoints(), [daemon.SATELLITE_LLAMA_SERVER_URL, daemon.LLAMA_SERVER_URL])
+        with self._up(gpu=True):
+            self.assertEqual(daemon.tier2_endpoints(), [daemon.FALLBACK_LLAMA_SERVER_URL, daemon.LLAMA_SERVER_URL])
+        with self._up():
             self.assertEqual(daemon.tier2_endpoints(), [daemon.LLAMA_SERVER_URL])
+
+    def test_best_backend_names_the_first_that_is_up(self):
+        with self._up(gpu=True, satellite=True):
+            self.assertEqual(daemon.best_backend(), "gpu")
+        with self._up(satellite=True):
+            self.assertEqual(daemon.best_backend(), "satellite")
+        with self._up():
+            self.assertEqual(daemon.best_backend(), "homelab")
+
+    def test_failing_backend_falls_through_to_the_next_endpoint(self):
+        seen = []
+
+        def fake_post(url, json=None, timeout=None):
+            seen.append(url)
+            if url == daemon.SATELLITE_LLAMA_SERVER_URL:
+                raise daemon.requests.exceptions.ConnectionError("satellite went to sleep")
+            return mock.Mock(status_code=200, json=lambda: {
+                "choices": [{"message": {"content": "ok"}}], "usage": {}})
+
+        import tempfile
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(daemon, "tier2_endpoints",
+                                  return_value=[daemon.SATELLITE_LLAMA_SERVER_URL, daemon.LLAMA_SERVER_URL]), \
+                mock.patch.object(daemon.requests, "post", fake_post):
+            img = Path(d) / "x.jpg"
+            Image.new("RGB", (64, 64)).save(img)
+            res = daemon.query_tier2_qwen(img, "q")
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(seen, [daemon.SATELLITE_LLAMA_SERVER_URL, daemon.LLAMA_SERVER_URL])
+        self.assertEqual(res["endpoint"], daemon.LLAMA_SERVER_URL)
 
 
 class TestPlanRoute(unittest.TestCase):
-    def plan(self, query, crop=None, gpu=False):
-        with mock.patch.object(daemon, "gpu_awake", return_value=gpu):
+    def plan(self, query, crop=None, gpu=False, satellite=False):
+        with mock.patch.object(daemon, "backend_up",
+                               side_effect=lambda n: {"gpu": gpu, "satellite": satellite}.get(n, False)):
             return daemon.plan_route(query, crop)
 
     def test_gpu_awake_sends_everything_to_the_gpu_at_full_budget(self):
@@ -104,6 +154,23 @@ class TestPlanRoute(unittest.TestCase):
     def test_crop_goes_to_homelab_at_1024(self):
         p = self.plan("Is there a cup?", crop=[100, 100, 400, 400])
         self.assertEqual((p["backend"], p["tier2_px"]), ("homelab", 1024))
+
+    def test_satellite_awake_serves_scenes_reading_and_crops_but_not_the_gpu_shortcut(self):
+        p = self.plan("What is on the desk?", satellite=True)
+        self.assertEqual((p["backend"], p["tier2_px"]), ("satellite", 512))
+        p = self.plan("Read the dosage", satellite=True)
+        self.assertEqual((p["backend"], p["tier2_px"]), ("satellite", config.READ_PX))
+        p = self.plan("Is there a cup?", crop=[1, 1, 9, 9], satellite=True)
+        self.assertEqual((p["backend"], p["tier2_px"]), ("satellite", 1024))
+
+    def test_yes_no_still_starts_on_the_phone_when_only_the_satellite_is_up(self):
+        p = self.plan("Is there a cup?", satellite=True)
+        self.assertEqual(p["backend"], "edge")
+        self.assertEqual(p["tier2_backend"], "satellite")
+
+    def test_gpu_beats_satellite(self):
+        p = self.plan("What is on the desk?", gpu=True, satellite=True)
+        self.assertEqual((p["backend"], p["tier2_px"]), ("gpu", 1024))
 
     def test_presence_starts_on_the_phone(self):
         p = self.plan("Is there a keyboard?")
@@ -142,8 +209,9 @@ class TestCycleRouting(unittest.TestCase):
         mock.patch.stopall()
         self.tmp.cleanup()
 
-    def run_cycle(self, query, gpu=False, play_audio=False, crop=None):
-        with mock.patch.object(daemon, "gpu_awake", return_value=gpu):
+    def run_cycle(self, query, gpu=False, play_audio=False, crop=None, satellite=False):
+        with mock.patch.object(daemon, "backend_up",
+                               side_effect=lambda n: {"gpu": gpu, "satellite": satellite}.get(n, False)):
             return daemon.execute_ambient_cycle(query, source="camera", lang="en",
                                                 play_audio=play_audio, crop_bbox=crop)
 
@@ -207,6 +275,14 @@ class TestCycleRouting(unittest.TestCase):
         self.speak.side_effect = fake_speak
         self.run_cycle("What is on the desk?", play_audio=True)
         self.assertEqual(order, ["cue", "tier2_done", "answer"])
+
+    def test_satellite_awake_labels_the_tier_and_still_speaks_the_cue(self):
+        res = self.run_cycle("What is on the desk?", satellite=True, play_audio=True)
+        self.edge.assert_not_called()
+        self.assertEqual(res["resolution_tier"], "Tier 2 (Satellite)")
+        self.assertEqual(res["route"]["backend"], "satellite")
+        spoken = [c.args[0] for c in self.speak.call_args_list]
+        self.assertEqual(len(spoken), 2)               # the cue (14 s wait) and the answer
 
     def test_no_cue_when_the_gpu_answers_fast(self):
         self.run_cycle("What is on the desk?", gpu=True, play_audio=True)

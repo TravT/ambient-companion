@@ -7,7 +7,7 @@
 
 ---
 
-## 1. System Architecture: availability-first routing (v1.3)
+## 1. System Architecture: availability-first routing (v1.4)
 
 The tier is chosen by hardware that is awake and by the shape of the question, not by asking the small model to grade itself (the old 2P-VEP self-critique cost ~7 s and often escalated anyway). Measured 2026-10-07: Tier 2 time is almost linear in visual tokens (~10 tokens/s prefill on the Dell CPU): 512 px = 303 tokens = 31 s, 1024 px = ~1044 tokens = 103 s.
 
@@ -16,12 +16,13 @@ flowchart TD
     A["Optical Ingestion\n(Camera / DroidCamX / RTSP / Dropzone)"] --> R{"Route\n(no model involved)"}
 
     R -->|"RTX 5070 desktop awake\n(/health answers; never woken)"| GPU["Tier 2 on the GPU\n1024 px, ~1 s, no phone pass"]
+    R -->|"MateBook satellite awake\n(/health answers; never woken)"| SAT["Tier 2 on the satellite\nnative llama-server, 512 px ~14 s, 768 px ~29 s"]
 
     R -->|"yes/no question\n('Is there a cup?')"| C["Edge: SmolVLM-256M on the S20\none pass, ~8 s"]
     C -->|"clear yes/no"| F["Resolved at the edge\n(0 homelab CPU)"]
     C -->|"empty / hedged / not a yes-no"| H
 
-    R -->|"describe, locate"| H["Tier 2 on the Dell CPU\nQwen2.5-VL-3B, 512 px, ~30 s"]
+    R -->|"describe, locate"| H["Tier 2: satellite if awake, else the Dell CPU\nQwen2.5-VL-3B, 512 px (~14 s / ~30 s)"]
     R -->|"reading / OCR"| H2["Tier 2 on the Dell CPU\n768 px (~55 s)"]
     R -->|"crop_bbox given"| H3["Tier 2 on the Dell CPU\nnative-resolution crop, <=1024 px"]
 
@@ -29,6 +30,7 @@ flowchart TD
 
     F --> I["Voice on the S20\n(resident pocket-tts, your cloned voice / Rafael)"]
     GPU --> I
+    SAT --> I
     H --> I
     H2 --> I
     H3 --> I
@@ -132,6 +134,7 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | `AMBIENT_ALLOWED_DIRS` | unset (unrestricted) | Colon list the `file` source may read (set in the container) |
 | `AMBIENT_HOST` / `AMBIENT_PORT` | `127.0.0.1` / `8089` | HTTP listener |
 | `AMBIENT_API_TOKEN` | empty (auth off) | Bearer token for `POST /mcp` |
+| `SATELLITE_LLAMA_SERVER_URL` | `http://100.105.6.62:8090/v1/chat/completions` | MateBook satellite llama-server (`satellite_vlm` Ansible role, tailnet only, about 2x the Dell). Probed with `/health`, never woken; `""` disables |
 | `AMBIENT_PREFER_GPU` / `AMBIENT_GPU_PROBE_TTL` | `1` / `15` | Use the RTX 5070 desktop first when its `/health` answers (probed, never woken); probe cache in seconds |
 | `AMBIENT_SCENE_PX` / `AMBIENT_READ_PX` | `512` / `768` | Longest side sent to the Dell for scenes and for reading (crops go up to 1024; the GPU always gets 1024) |
 | `AMBIENT_RETENTION_DAYS` | `7` | Age after which cached frames/WAVs are deleted |

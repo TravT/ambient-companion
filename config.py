@@ -36,6 +36,12 @@ VLM_MODEL = os.getenv("VLM_MODEL", "qwen2.5vl:3b")
 # The fallback URL is the RTX 5070 desktop. It is used FIRST when it answers /health (it is awake),
 # and never woken by the companion (the owner decides when it runs).
 PREFER_GPU = os.getenv("AMBIENT_PREFER_GPU", "1") == "1"
+# MateBook satellite (omarchy-station): native llama-server on the tailnet (satellite_vlm role), about 2x
+# the Dell's speed (512 px in 14 s against 31 s). Used before the Dell when its /health answers; set
+# SATELLITE_LLAMA_SERVER_URL="" to disable. It is never woken by the companion.
+SATELLITE_LLAMA_SERVER_URL = os.getenv(
+    "SATELLITE_LLAMA_SERVER_URL", "http://100.105.6.62:8090/v1/chat/completions"
+)
 GPU_PROBE_TTL_SEC = float(os.getenv("AMBIENT_GPU_PROBE_TTL", "15"))
 # Longest side sent to Tier 2 on the Dell CPU (prefill is ~10 visual tokens/s, so cost ~ pixels):
 # scenes 512 px (~30 s), reading 768 px (~55 s), crops up to 1024 px native. The GPU always gets 1024.

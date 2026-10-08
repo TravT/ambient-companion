@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.2.0"
+SERVER_VERSION = "2.4.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -69,13 +69,16 @@ def readiness() -> dict:
     except Exception:
         pass
 
+    backends = {"gpu": daemon.backend_up("gpu"), "satellite": daemon.backend_up("satellite"),
+                "homelab": llama_ok}
     return {
         "adb": adb_ok,
         "edge_temp_c": temp_c,
         "battery_level": battery,
         "thermal_breaker": temp_c is not None and temp_c >= daemon.MAX_SAFE_TEMP_C,
         "llama_server": llama_ok,
-        "gpu_node": daemon.gpu_awake(),
+        "gpu_node": backends["gpu"],
+        "backends": backends,
         "tts_available": daemon.tts_available(),
     }
 
@@ -85,10 +88,10 @@ TOOLS = [
         "name": "ambient_escalation_cycle",
         "description": (
             "End-to-end ambient answer with routing instead of self-critique. If the RTX 5070 desktop is awake, "
-            "everything goes there (about a second). Otherwise yes/no questions get one SmolVLM pass on the S20 FE "
+            "everything goes there (about a second). The MateBook satellite, when awake, serves Tier 2 about twice as fast as the Dell. Otherwise yes/no questions get one SmolVLM pass on the S20 FE "
             "(escalated only if the answer is empty, hedged or not a yes/no), while reading, locating and open-ended "
             "questions go straight to the Dell Qwen2.5-VL (512 px scenes, 768 px reading, native crops with crop_bbox). "
-            "Speaks \"let me look closer\" while the Dell works, then the answer, on the phone. Sources: 'camera', "
+            "Speaks \"let me look closer\" while the satellite or the Dell works, then the answer, on the phone. Sources: 'camera', "
             "'droidcam', 'http://...', 'rtsp://...', or a local file."
         ),
         "parameters": {
@@ -372,7 +375,8 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 f"- ADB Gateway: {'CONNECTED' if r['adb'] else 'UNREACHABLE'} "
                 f"({daemon.CONTAINER_IP} -> {daemon.DEVICE_TARGET})\n"
                 f"- Homelab llama-server: {'HEALTHY (200 OK)' if r['llama_server'] else 'UNHEALTHY / OFFLINE'}\n"
-                f"- RTX 5070 desktop: {'AWAKE (used first for Tier 2)' if r['gpu_node'] else 'asleep (never woken by the companion)'}\n"
+                f"- RTX 5070 desktop: {'AWAKE (used first for Tier 2)' if r['backends']['gpu'] else 'asleep (never woken by the companion)'}\n"
+                f"- MateBook satellite: {'AWAKE (used before the Dell for Tier 2)' if r['backends']['satellite'] else 'asleep or offline (never woken by the companion)'}\n"
                 f"- Voice (pocket-tts, mode {config.TTS_MODE}): {'available' if r['tts_available'] else 'unavailable (not installed on the S20, or disabled)'}"
             )
             return {

@@ -62,6 +62,7 @@ CONTAINER_IP = config.ADB_GATEWAY_HOST
 DEVICE_TARGET = config.DEVICE_TARGET
 LLAMA_SERVER_URL = config.LLAMA_SERVER_URL
 FALLBACK_LLAMA_SERVER_URL = config.FALLBACK_LLAMA_SERVER_URL
+SATELLITE_LLAMA_SERVER_URL = config.SATELLITE_LLAMA_SERVER_URL
 MAX_SAFE_TEMP_C = config.MAX_SAFE_TEMP_C
 
 # --- Edge Paths & Models ---
@@ -270,7 +271,7 @@ def query_edge_smolvlm(image_remote_name: str, prompt: str, max_tokens: int = 30
     }
 
 
-_gpu_probe = (0.0, False)
+_probe_cache: Dict[str, Tuple[float, bool]] = {}
 
 
 def health_url(chat_url: str) -> str:
@@ -278,40 +279,63 @@ def health_url(chat_url: str) -> str:
     return chat_url.split("/v1/", 1)[0].rstrip("/") + "/health"
 
 
-def gpu_awake() -> bool:
-    """True when the RTX 5070 desktop's llama-server answers right now. Never wakes it; cached briefly."""
-    global _gpu_probe
-    if not config.PREFER_GPU or not FALLBACK_LLAMA_SERVER_URL or FALLBACK_LLAMA_SERVER_URL == LLAMA_SERVER_URL:
+def backend_up(name: str) -> bool:
+    """True when the optional Tier 2 backend ("gpu" desktop or "satellite") answers /health right now.
+
+    Probe only: the companion never wakes either machine. Results are cached briefly.
+    """
+    if name == "gpu":
+        url = FALLBACK_LLAMA_SERVER_URL if config.PREFER_GPU else ""
+    elif name == "satellite":
+        url = SATELLITE_LLAMA_SERVER_URL
+    else:
+        return False
+    if not url or url == LLAMA_SERVER_URL:
         return False
     now = time.time()
-    probed_at, last = _gpu_probe
+    probed_at, last = _probe_cache.get(name, (0.0, False))
     if now - probed_at < config.GPU_PROBE_TTL_SEC:
         return last
     try:
-        awake = requests.get(health_url(FALLBACK_LLAMA_SERVER_URL), timeout=(0.6, 1.5)).status_code == 200
+        up = requests.get(health_url(url), timeout=(0.6, 1.5)).status_code == 200
     except Exception:
-        awake = False
-    _gpu_probe = (now, awake)
-    return awake
+        up = False
+    _probe_cache[name] = (now, up)
+    return up
+
+
+def best_backend() -> str:
+    """Fastest Tier 2 backend that is up: gpu, then satellite, else the Dell ("homelab")."""
+    for name in ("gpu", "satellite"):
+        if backend_up(name):
+            return name
+    return "homelab"
 
 
 def tier2_endpoints() -> List[str]:
-    """GPU first when it is awake, then the Dell CPU llama-server."""
-    return [FALLBACK_LLAMA_SERVER_URL, LLAMA_SERVER_URL] if gpu_awake() else [LLAMA_SERVER_URL]
+    """Tier 2 chat endpoints in preference order; the Dell CPU server is always the last resort."""
+    urls = []
+    if backend_up("gpu"):
+        urls.append(FALLBACK_LLAMA_SERVER_URL)
+    if backend_up("satellite"):
+        urls.append(SATELLITE_LLAMA_SERVER_URL)
+    urls.append(LLAMA_SERVER_URL)
+    return urls
 
 
 def plan_route(query: str, crop_bbox: Optional[List[int]] = None) -> dict:
     """Pick the backend and the Tier 2 image budget for this question."""
     kind = classify_query(query)
-    if gpu_awake():
-        return {"kind": kind, "backend": "gpu", "tier2_px": 1024}
+    best = best_backend()
+    if best == "gpu":
+        return {"kind": kind, "backend": "gpu", "tier2_backend": "gpu", "tier2_px": 1024}
     if crop_bbox:
-        return {"kind": kind, "backend": "homelab", "tier2_px": 1024}
+        return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": 1024}
     if kind == "ocr":
-        return {"kind": kind, "backend": "homelab", "tier2_px": config.READ_PX}
+        return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": config.READ_PX}
     if kind in ("locate", "describe"):
-        return {"kind": kind, "backend": "homelab", "tier2_px": config.SCENE_PX}
-    return {"kind": kind, "backend": "edge", "tier2_px": config.SCENE_PX}
+        return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": config.SCENE_PX}
+    return {"kind": kind, "backend": "edge", "tier2_backend": best, "tier2_px": config.SCENE_PX}
 
 
 def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> dict:
@@ -620,23 +644,26 @@ def execute_ambient_cycle(
             final_answer = p1_res["text"]
 
     if not final_answer:
-        if plan["backend"] == "gpu":
+        t2 = plan["tier2_backend"]
+        if t2 == "gpu":
             telemetry["resolution_tier"] = "Tier 2 (GPU)"
         elif escalated:
-            telemetry["resolution_tier"] = "Tier 2 (Escalation via Homelab)"
+            telemetry["resolution_tier"] = f"Tier 2 (Escalation via {t2.capitalize()})"
+        elif t2 == "satellite":
+            telemetry["resolution_tier"] = "Tier 2 (Satellite)"
         else:
             telemetry["resolution_tier"] = "Tier 2 (Direct)"
 
         # The CPU path takes tens of seconds: say something while it runs. The GPU answers
         # in about a second, so a cue would only delay the answer.
         cue_thread = None
-        if play_audio and plan["backend"] != "gpu":
+        if play_audio and plan["tier2_backend"] != "gpu":
             cue_text = "Let me look closer." if lang == "en" else "Deixe-me olhar com mais atenção."
             print(f"   🗣️  [Voice Cue]: \"{cue_text}\"")
             cue_thread = threading.Thread(target=speak, args=(cue_text, lang), daemon=True)
             cue_thread.start()
 
-        print(f"   🏠 Querying Tier 2 llama-server ({plan['tier2_px']}px, backend {plan['backend']})...")
+        print(f"   🏠 Querying Tier 2 llama-server ({plan['tier2_px']}px, backend {plan['tier2_backend']})...")
         t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=150)
         if cue_thread is not None:
             cue_thread.join(timeout=30)
