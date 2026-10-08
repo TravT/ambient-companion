@@ -7,29 +7,32 @@
 
 ---
 
-## 1. System Architecture: 2-Pass Verification & Escalation Protocol (2P-VEP)
+## 1. System Architecture: availability-first routing (v1.3)
+
+The tier is chosen by hardware that is awake and by the shape of the question, not by asking the small model to grade itself (the old 2P-VEP self-critique cost ~7 s and often escalated anyway). Measured 2026-10-07: Tier 2 time is almost linear in visual tokens (~10 tokens/s prefill on the Dell CPU): 512 px = 303 tokens = 31 s, 1024 px = ~1044 tokens = 103 s.
 
 ```mermaid
 flowchart TD
-    A["Optical Ingestion\n(Camera / DroidCamX / RTSP / Dropzone)"] --> B{"Pass 0: Intent Filter\n(Regex Intent Classifier)"}
-    
-    B -->|"Dense OCR / Fine Reading\n(Pill bottles, text, labels)"| H["Tier 2 Homelab llama-server\n(Qwen2.5-VL-3B on Dell CPU)"]
-    
-    B -->|"General Scene Check\n(Desk state, objects, presence)"| C["Pass 1: Edge Triage\n(SmolVLM-256M on Snapdragon 865)"]
-    
-    C --> D["Pass 2: Edge Self-Critique\n(Certainty & Ambiguity Check)"]
-    
-    D --> E{"Is Observation\nCertain & Clear?"}
-    
-    E -->|"Yes (Sim / Certain)"| F["Resolved at Edge\n(0 Homelab CPU / 0 Cloud Tokens)"]
-    
-    E -->|"No / Ambiguous"| G["Spoken Escalation Cue\n('Let me check with the homelab...')"]
-    G --> H
-    
-    F --> I["Pocket-TTS Voice Synthesis\n(User Cloned Voice / Rafael Studio)"]
+    A["Optical Ingestion\n(Camera / DroidCamX / RTSP / Dropzone)"] --> R{"Route\n(no model involved)"}
+
+    R -->|"RTX 5070 desktop awake\n(/health answers; never woken)"| GPU["Tier 2 on the GPU\n1024 px, ~1 s, no phone pass"]
+
+    R -->|"yes/no question\n('Is there a cup?')"| C["Edge: SmolVLM-256M on the S20\none pass, ~8 s"]
+    C -->|"clear yes/no"| F["Resolved at the edge\n(0 homelab CPU)"]
+    C -->|"empty / hedged / not a yes-no"| H
+
+    R -->|"describe, locate"| H["Tier 2 on the Dell CPU\nQwen2.5-VL-3B, 512 px, ~30 s"]
+    R -->|"reading / OCR"| H2["Tier 2 on the Dell CPU\n768 px (~55 s)"]
+    R -->|"crop_bbox given"| H3["Tier 2 on the Dell CPU\nnative-resolution crop, <=1024 px"]
+
+    H -.->|"spoken while it runs"| Q["'Let me look closer.'"]
+
+    F --> I["Voice on the S20\n(resident pocket-tts, your cloned voice / Rafael)"]
+    GPU --> I
     H --> I
-    
-    I --> J["Galaxy S20 FE Audio Playback\n(PulseAudio AAudio Sink @ 30% Vol)"]
+    H2 --> I
+    H3 --> I
+    I --> J["S20 speaker via paplay"]
 ```
 
 ---
@@ -129,6 +132,8 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | `AMBIENT_ALLOWED_DIRS` | unset (unrestricted) | Colon list the `file` source may read (set in the container) |
 | `AMBIENT_HOST` / `AMBIENT_PORT` | `127.0.0.1` / `8089` | HTTP listener |
 | `AMBIENT_API_TOKEN` | empty (auth off) | Bearer token for `POST /mcp` |
+| `AMBIENT_PREFER_GPU` / `AMBIENT_GPU_PROBE_TTL` | `1` / `15` | Use the RTX 5070 desktop first when its `/health` answers (probed, never woken); probe cache in seconds |
+| `AMBIENT_SCENE_PX` / `AMBIENT_READ_PX` | `512` / `768` | Longest side sent to the Dell for scenes and for reading (crops go up to 1024; the GPU always gets 1024) |
 | `AMBIENT_RETENTION_DAYS` | `7` | Age after which cached frames/WAVs are deleted |
 | `AMBIENT_TTS_MODE` | `edge` | `edge`: pocket-tts runs on the S20 FE (Termux) and plays via `paplay`; `host`: synthesize locally with `POCKET_TTS_BIN` and push the WAV (dev CLI); `off`: never speak |
 | `EDGE_TTS_BIN` / `EDGE_VOICE_EN` / `EDGE_VOICE_PT` | `pocket-tts` / `~/voices/voice_profile_user_optionB_full25s.safetensors` / `rafael` | Voice backend and profiles inside Termux |
@@ -141,7 +146,7 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 
 | Tool Name | Scope & Capabilities | Parameters |
 | :--- | :--- | :--- |
-| `ambient_escalation_cycle` | Autonomous 2P-VEP: intent detection, edge triage, self-critique, core escalation, voice synthesis, and audio alert. Supports `crop_bbox` for focused macro zoom. | `query` (str), `source` (str), `language` ("auto"\|"en"\|"pt"), `crop_bbox` (list[int]), `play_audio` (bool) |
+| `ambient_escalation_cycle` | Routed answer (GPU when awake, else by question shape), spoken cue while the Dell works, and the answer spoken on the phone. Supports `crop_bbox` for focused macro zoom. | `query` (str), `source` (str), `language` ("auto"\|"en"\|"pt"), `crop_bbox` (list[int]), `play_audio` (bool) |
 | `ambient_triage_scene` | Tier 1 Edge triage strictly on Snapdragon 865 CPU (<8s, 0 cloud tokens). **Cannot read fine text.** | `query` (str), `source` (str), `crop_bbox` (list[int]) |
 | `ambient_ocr_and_grounding` | Tier 2 Homelab inference (Qwen2.5-VL-3B). High-precision reading, pill labels, and 2D bounding boxes. Supports RoI Crop-on-Demand with automatic parent coordinate remapping. | `query` (str), `source` (str), `crop_bbox` (list[int]), `max_tokens` (int) |
 | `ambient_speak` | Kyutai Pocket-TTS voice cloning (<150ms TTFA) + S20 FE stereo speaker playback. | `text` (str), `language` ("en"\|"pt") |

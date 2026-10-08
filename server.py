@@ -43,8 +43,7 @@ def log_debug(msg: str):
 
 def llama_health_url() -> str:
     """Health endpoint of the Tier 2 llama-server derived from its chat URL."""
-    base = daemon.LLAMA_SERVER_URL.split("/v1/", 1)[0].rstrip("/")
-    return f"{base}/health"
+    return daemon.health_url(daemon.LLAMA_SERVER_URL)
 
 
 def readiness() -> dict:
@@ -76,6 +75,7 @@ def readiness() -> dict:
         "battery_level": battery,
         "thermal_breaker": temp_c is not None and temp_c >= daemon.MAX_SAFE_TEMP_C,
         "llama_server": llama_ok,
+        "gpu_node": daemon.gpu_awake(),
         "tts_available": daemon.tts_available(),
     }
 
@@ -84,10 +84,12 @@ TOOLS = [
     {
         "name": "ambient_escalation_cycle",
         "description": (
-            "Autonomous Two-Pass Verification & Escalation Protocol (2P-VEP). "
-            "Ingests a frame from an optical source ('camera', 'droidcam', 'http://...', 'rtsp://...', or a local file), "
-            "evaluates intent, attempts Tier 1 Edge triage on Snapdragon 865, executes Pass 2 self-critique, "
-            "escalates to Tier 2 homelab server if ambiguous or dense OCR is required, and speaks the verified answer aloud."
+            "End-to-end ambient answer with routing instead of self-critique. If the RTX 5070 desktop is awake, "
+            "everything goes there (about a second). Otherwise yes/no questions get one SmolVLM pass on the S20 FE "
+            "(escalated only if the answer is empty, hedged or not a yes/no), while reading, locating and open-ended "
+            "questions go straight to the Dell Qwen2.5-VL (512 px scenes, 768 px reading, native crops with crop_bbox). "
+            "Speaks \"let me look closer\" while the Dell works, then the answer, on the phone. Sources: 'camera', "
+            "'droidcam', 'http://...', 'rtsp://...', or a local file."
         ),
         "parameters": {
             "type": "object",
@@ -279,7 +281,7 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             crop_param = arguments.get("crop_bbox") or arguments.get("roi_crop")
             
             raw_img = optical_ingestion.acquire_image(source)
-            budget_max_dim = 1024 if crop_param else 512
+            budget_max_dim = daemon.plan_route(query, crop_param)["tier2_px"]
             tier2_img = daemon.BENCHMARK_DIR / f"mcp_tier2_{budget_max_dim}px_{raw_img.stem}.jpg"
             _, meta = optical_ingestion.prepare_budgeted_image(raw_img, budget_max_dim, tier2_img, crop_bbox=crop_param)
             
@@ -370,6 +372,7 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 f"- ADB Gateway: {'CONNECTED' if r['adb'] else 'UNREACHABLE'} "
                 f"({daemon.CONTAINER_IP} -> {daemon.DEVICE_TARGET})\n"
                 f"- Homelab llama-server: {'HEALTHY (200 OK)' if r['llama_server'] else 'UNHEALTHY / OFFLINE'}\n"
+                f"- RTX 5070 desktop: {'AWAKE (used first for Tier 2)' if r['gpu_node'] else 'asleep (never woken by the companion)'}\n"
                 f"- Voice (pocket-tts, mode {config.TTS_MODE}): {'available' if r['tts_available'] else 'unavailable (not installed on the S20, or disabled)'}"
             )
             return {

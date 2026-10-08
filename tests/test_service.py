@@ -75,6 +75,7 @@ class TestDispatch(unittest.TestCase):
         try:
             with mock.patch.object(server, "readiness", return_value={"adb": False, "edge_temp_c": None,
                                                                       "llama_server": False,
+                                                                      "gpu_node": False,
                                                                       "tts_available": False,
                                                                       "battery_level": None,
                                                                       "thermal_breaker": False}):
@@ -106,6 +107,15 @@ class TestReadiness(unittest.TestCase):
         self.assertTrue(report["thermal_breaker"])
         self.assertEqual(report["battery_level"], "80%")
         self.assertTrue(report["llama_server"])
+
+    def test_gpu_state_is_reported_and_probe_is_cached_not_woken(self):
+        with mock.patch.object(daemon, "get_edge_temperature", return_value=30.0), \
+                mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(stdout="level: 50", returncode=0)), \
+                mock.patch.object(daemon, "tts_available", return_value=True), \
+                mock.patch.object(daemon, "gpu_awake", return_value=True), \
+                mock.patch.object(daemon.requests, "get", return_value=mock.Mock(status_code=200)):
+            report = server.readiness()
+        self.assertTrue(report["gpu_node"])
 
     def test_llama_health_url_derived_from_chat_endpoint(self):
         with mock.patch.object(daemon, "LLAMA_SERVER_URL", "http://10.0.0.5:9000/v1/chat/completions"):

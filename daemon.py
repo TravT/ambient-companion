@@ -42,6 +42,7 @@ import json
 import base64
 import re
 import shlex
+import threading
 import argparse
 import subprocess
 import requests
@@ -166,16 +167,37 @@ def detect_ocr_intent(query: str) -> bool:
     return any(re.search(p, q) for p in patterns)
 
 
-_YES_RE = re.compile(r"\b(yes|sim)\b", re.IGNORECASE)
-_NO_RE = re.compile(r"\b(no|n[aã]o|unclear|unsure|uncertain)\b", re.IGNORECASE)
+_LOCATE_RE = re.compile(r"\b(where|locate|bounding|bbox|onde|localiz\w*)\b", re.IGNORECASE)
+_PRESENCE_RE = re.compile(
+    r"^\s*(is|are|was|were|do|does|did|can|could|has|have|any|tem|t[eê]m|h[aá]|existe|existem|est[aá]|voc[eê] v[eê])\b",
+    re.IGNORECASE,
+)
+_HEDGE_RE = re.compile(
+    r"\b(not sure|unsure|unclear|uncertain|maybe|might|possibly|cannot|can't|unable|n[aã]o sei|talvez)\b",
+    re.IGNORECASE,
+)
+_YESNO_RE = re.compile(r"\b(yes|no|sim|n[aã]o)\b", re.IGNORECASE)
 
 
-def critique_is_confident(text: str) -> bool:
-    """Pass 2 verdict: an affirmative answer with no negation or doubt.
+def classify_query(query: str) -> str:
+    """Question shape: ocr | locate | presence (yes/no) | describe. Decides the tier, not a model."""
+    if detect_ocr_intent(query):
+        return "ocr"
+    if _LOCATE_RE.search(query):
+        return "locate"
+    if _PRESENCE_RE.search(query):
+        return "presence"
+    return "describe"
 
-    Matches whole words, so "NOTE" or "KNOWN" no longer count as "NO".
-    """
-    return bool(_YES_RE.search(text)) and not _NO_RE.search(text)
+
+def needs_escalation(text: str) -> bool:
+    """True when the phone's answer to a yes/no question is empty, hedged or not a yes/no at all."""
+    t = (text or "").strip()
+    if not t or t.lower() == "no response parsed":
+        return True
+    if _HEDGE_RE.search(t):
+        return True
+    return not _YESNO_RE.search(t)
 
 
 def detect_language(query: str) -> str:
@@ -248,6 +270,50 @@ def query_edge_smolvlm(image_remote_name: str, prompt: str, max_tokens: int = 30
     }
 
 
+_gpu_probe = (0.0, False)
+
+
+def health_url(chat_url: str) -> str:
+    """llama-server health endpoint derived from its chat-completions URL."""
+    return chat_url.split("/v1/", 1)[0].rstrip("/") + "/health"
+
+
+def gpu_awake() -> bool:
+    """True when the RTX 5070 desktop's llama-server answers right now. Never wakes it; cached briefly."""
+    global _gpu_probe
+    if not config.PREFER_GPU or not FALLBACK_LLAMA_SERVER_URL or FALLBACK_LLAMA_SERVER_URL == LLAMA_SERVER_URL:
+        return False
+    now = time.time()
+    probed_at, last = _gpu_probe
+    if now - probed_at < config.GPU_PROBE_TTL_SEC:
+        return last
+    try:
+        awake = requests.get(health_url(FALLBACK_LLAMA_SERVER_URL), timeout=(0.6, 1.5)).status_code == 200
+    except Exception:
+        awake = False
+    _gpu_probe = (now, awake)
+    return awake
+
+
+def tier2_endpoints() -> List[str]:
+    """GPU first when it is awake, then the Dell CPU llama-server."""
+    return [FALLBACK_LLAMA_SERVER_URL, LLAMA_SERVER_URL] if gpu_awake() else [LLAMA_SERVER_URL]
+
+
+def plan_route(query: str, crop_bbox: Optional[List[int]] = None) -> dict:
+    """Pick the backend and the Tier 2 image budget for this question."""
+    kind = classify_query(query)
+    if gpu_awake():
+        return {"kind": kind, "backend": "gpu", "tier2_px": 1024}
+    if crop_bbox:
+        return {"kind": kind, "backend": "homelab", "tier2_px": 1024}
+    if kind == "ocr":
+        return {"kind": kind, "backend": "homelab", "tier2_px": config.READ_PX}
+    if kind in ("locate", "describe"):
+        return {"kind": kind, "backend": "homelab", "tier2_px": config.SCENE_PX}
+    return {"kind": kind, "backend": "edge", "tier2_px": config.SCENE_PX}
+
+
 def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> dict:
     """
     Queries Tier 2 llama-server hosting Qwen2.5-VL-3B.
@@ -272,9 +338,7 @@ def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> di
         "temperature": 0.2
     }
     
-    endpoints = [LLAMA_SERVER_URL]
-    if FALLBACK_LLAMA_SERVER_URL and FALLBACK_LLAMA_SERVER_URL != LLAMA_SERVER_URL:
-        endpoints.append(FALLBACK_LLAMA_SERVER_URL)
+    endpoints = tier2_endpoints()
         
     last_err = None
     t0 = time.time()
@@ -468,19 +532,19 @@ def execute_ambient_cycle(
 ) -> dict:
     """
     Executes an end-to-end ambient companion cycle:
-    1. Optical Ingestion (Termux Camera, DroidCam, RTSP, or File)
-    2. RoI Crop-on-Demand & Visual Token Budgeting
-    3. Pass 0: Intent Filter
-    4. Pass 1: Edge Triage (SmolVLM-256M)
-    5. Pass 2: Edge Self-Critique
-    6. Tier 2 Homelab Escalation & Coordinate Remapping (if needed)
-    7. Pocket-TTS Voice Synthesis
-    8. Galaxy S20 FE Audio Playback
+    1. Thermal / reachability check of the S20 FE
+    2. Route (no model involved): GPU desktop when awake; otherwise by question shape.
+       yes/no questions start on the phone (SmolVLM, one pass); reading, locating and
+       open-ended questions go straight to the Dell (512 px scenes, 768 px reading).
+    3. Optical ingestion, RoI crop and visual token budgeting
+    4. Phone answer, escalated only when it is empty, hedged or not a yes/no
+    5. Tier 2 call (the "let me look closer" cue is spoken while it runs)
+    6. Voice on the S20 FE
     """
     cycle_start = time.time()
     if lang is None:
         lang = detect_language(query)
-        
+
     print(f"\n=======================================================")
     print(f" Ambient Multimodal Companion Cycle")
     print(f"=======================================================")
@@ -489,7 +553,7 @@ def execute_ambient_cycle(
     print(f"• Language   : {lang.upper()}")
     if crop_bbox:
         print(f"• RoI Crop   : {crop_bbox} (Optical Macro Zoom)")
-    
+
     # Step 0: Check Edge Device Thermal State
     temp_c = get_edge_temperature()
     if temp_c is None:
@@ -499,23 +563,25 @@ def execute_ambient_cycle(
     if temp_c >= MAX_SAFE_TEMP_C:
         print(f"🚨 THERMAL CIRCUIT BREAKER: Edge temperature {temp_c:.1f}°C exceeds threshold! Aborting.")
         return {"status": "aborted_thermal", "temp_c": temp_c}
-        
+
+    plan = plan_route(query, crop_bbox)
+    print(f"• Route      : {plan['kind']} -> {plan['backend']} (Tier 2 image {plan['tier2_px']}px)")
+
     # Step 1: Optical Acquisition
     print(f"\n📷 [Optical Ingestion] Acquiring frame from source: '{source}'...")
     t0_opt = time.time()
     raw_img = optical_ingestion.acquire_image(source)
     opt_dur = round(time.time() - t0_opt, 2)
     print(f"   ✓ Acquired: {raw_img.name} ({opt_dur}s)")
-    
-    # Budget frames (384px for Edge SmolVLM, 1024px budgeted for Tier 2 Qwen2.5-VL)
-    edge_img_local = BENCHMARK_DIR / f"daemon_edge_384px_{raw_img.stem}.jpg"
-    tier2_img_local = BENCHMARK_DIR / f"daemon_tier2_1024px_{raw_img.stem}.jpg"
-    _, edge_meta = optical_ingestion.prepare_budgeted_image(raw_img, 384, edge_img_local, crop_bbox=crop_bbox)
-    _, tier2_meta = optical_ingestion.prepare_budgeted_image(raw_img, 1024, tier2_img_local, crop_bbox=crop_bbox)
-    
+
+    tier2_img_local = BENCHMARK_DIR / f"daemon_tier2_{plan['tier2_px']}px_{raw_img.stem}.jpg"
+    _, tier2_meta = optical_ingestion.prepare_budgeted_image(
+        raw_img, plan["tier2_px"], tier2_img_local, crop_bbox=crop_bbox)
+
     telemetry = {
         "query": query,
         "language": lang,
+        "route": plan,
         "optical_source": source,
         "image_file": str(raw_img),
         "optical_acquisition_sec": opt_dur,
@@ -524,85 +590,67 @@ def execute_ambient_cycle(
         "crop_info": tier2_meta.get("crop_info"),
         "canvas_size": [tier2_meta.get("original_width"), tier2_meta.get("original_height")],
         "grounding_matches": [],
-        "steps": [],
+        "steps": [{"step": "Route", "decision": plan}],
         "resolution_tier": "",
         "final_answer": "",
         "total_latency_sec": 0.0
     }
-    
-    # Push edge frame to Termux on S20 FE
-    edge_remote_name = safe_remote_name(f"edge_frame_{raw_img.stem}.jpg")
-    push_frame_to_edge(edge_img_local, edge_remote_name)
 
-    # Pass 0: Intent Filter
-    is_ocr = detect_ocr_intent(query)
     final_answer = ""
-    
-    if is_ocr or crop_bbox:
-        reason = "RoI crop zoom active" if crop_bbox else "OCR match"
-        print(f"\n⚡ [Pass 0: Intent Filter] High-precision vision intent ({reason})! Bypassing Edge VLM directly to Tier 2.")
-        telemetry["steps"].append({"step": "Pass_0_Intent_Filter", "decision": "Bypass to Tier 2", "reason": reason})
-        telemetry["resolution_tier"] = "Tier 2 (Direct Escalation)"
-        
-        cue_text = "Reading text with the homelab server..." if lang == "en" else "Lendo o texto com o servidor do homelab..."
-        print(f"   🗣️  [Voice Cue]: \"{cue_text}\"")
-        
-        print(f"   🏠 Querying Homelab llama-server (1024px budgeted)...")
+    escalated = False
+
+    if plan["backend"] == "edge":
+        # Yes/no question: one SmolVLM pass on the phone. No self-critique call; the answer is
+        # checked by needs_escalation() (empty, hedged, or not a yes/no), which costs nothing.
+        edge_img_local = BENCHMARK_DIR / f"daemon_edge_384px_{raw_img.stem}.jpg"
+        optical_ingestion.prepare_budgeted_image(raw_img, 384, edge_img_local, crop_bbox=crop_bbox)
+        edge_remote_name = safe_remote_name(f"edge_frame_{raw_img.stem}.jpg")
+        push_frame_to_edge(edge_img_local, edge_remote_name)
+
+        print("\n🔍 [Edge] Running SmolVLM-256M on Snapdragon 865...")
+        p1_res = query_edge_smolvlm(edge_remote_name, query, max_tokens=25)
+        print(f"   ✓ Edge Output: \"{p1_res['text']}\" ({p1_res['duration_sec']}s)")
+        telemetry["steps"].append({"step": "Edge_Answer", "result": p1_res})
+        if needs_escalation(p1_res["text"]):
+            escalated = True
+            print("\n⚠️  [Escalating to Tier 2] Edge answer was empty, hedged or not a yes/no.")
+        else:
+            print("\n✅ [Resolved at Edge] Zero homelab egress.")
+            telemetry["resolution_tier"] = "Tier 1 (Edge On-Device)"
+            final_answer = p1_res["text"]
+
+    if not final_answer:
+        if plan["backend"] == "gpu":
+            telemetry["resolution_tier"] = "Tier 2 (GPU)"
+        elif escalated:
+            telemetry["resolution_tier"] = "Tier 2 (Escalation via Homelab)"
+        else:
+            telemetry["resolution_tier"] = "Tier 2 (Direct)"
+
+        # The CPU path takes tens of seconds: say something while it runs. The GPU answers
+        # in about a second, so a cue would only delay the answer.
+        cue_thread = None
+        if play_audio and plan["backend"] != "gpu":
+            cue_text = "Let me look closer." if lang == "en" else "Deixe-me olhar com mais atenção."
+            print(f"   🗣️  [Voice Cue]: \"{cue_text}\"")
+            cue_thread = threading.Thread(target=speak, args=(cue_text, lang), daemon=True)
+            cue_thread.start()
+
+        print(f"   🏠 Querying Tier 2 llama-server ({plan['tier2_px']}px, backend {plan['backend']})...")
         t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=150)
+        if cue_thread is not None:
+            cue_thread.join(timeout=30)
         final_answer = t2_res.get("content", "")
-        print(f"   ✓ Homelab Output: \"{final_answer}\" ({t2_res.get('duration_sec')}s | {t2_res.get('prompt_tokens', 0)} in, {t2_res.get('completion_tokens', 0)} out)")
-        telemetry["steps"].append({"step": "Tier_2_Homelab_Inference", "result": t2_res})
-        
-        boxes = optical_ingestion.parse_grounding_coordinates(
+        print(f"   ✓ Tier 2 Output: \"{final_answer}\" ({t2_res.get('duration_sec')}s | {t2_res.get('prompt_tokens', 0)} in, {t2_res.get('completion_tokens', 0)} out)")
+        telemetry["steps"].append({"step": "Tier_2_Inference", "result": t2_res})
+
+        telemetry["grounding_matches"] = optical_ingestion.parse_grounding_coordinates(
             final_answer,
             orig_w=tier2_meta.get("original_width", 1000),
             orig_h=tier2_meta.get("original_height", 1000),
             crop_info=tier2_meta.get("crop_info")
         )
-        telemetry["grounding_matches"] = boxes
-        
-    else:
-        # Pass 1: Edge Triage via SmolVLM-256M
-        print("\n🔍 [Pass 1: Edge Triage] Running SmolVLM-256M on Snapdragon 865...")
-        p1_res = query_edge_smolvlm(edge_remote_name, query, max_tokens=25)
-        print(f"   ✓ Edge Pass 1 Output: \"{p1_res['text']}\" ({p1_res['duration_sec']}s)")
-        telemetry["steps"].append({"step": "Pass_1_Edge_Triage", "result": p1_res})
-        
-        # Pass 2: Self-Critique Verification
-        critique_prompt = f"Is this observation completely clear and certain: '{p1_res['text']}'? Answer YES or NO."
-        print(f"   🧐 [Pass 2: Edge Self-Critique] Verifying certainty: \"{critique_prompt}\"...")
-        p2_res = query_edge_smolvlm(edge_remote_name, critique_prompt, max_tokens=10)
-        print(f"   ✓ Edge Pass 2 Output: \"{p2_res['text']}\" ({p2_res['duration_sec']}s)")
-        telemetry["steps"].append({"step": "Pass_2_Edge_Critique", "result": p2_res})
-        
-        # Evaluate Decision
-        is_confident = critique_is_confident(p2_res["text"])
 
-        if is_confident and len(p1_res["text"].strip()) > 3:
-            print("\n✅ [Resolved at Edge] High confidence verified! Zero homelab egress.")
-            telemetry["resolution_tier"] = "Tier 1 (Edge On-Device)"
-            final_answer = p1_res["text"]
-        else:
-            print("\n⚠️  [Escalating to Tier 2] Ambiguity or fine-detail flagged by self-critique.")
-            telemetry["resolution_tier"] = "Tier 2 (Escalation via Homelab)"
-            
-            cue_text = "Let me check with the homelab server..." if lang == "en" else "Deixe-me verificar com o servidor do homelab..."
-            print(f"   🗣️  [Voice Cue]: \"{cue_text}\"")
-            
-            print(f"   🏠 Querying Homelab llama-server (1024px budgeted)...")
-            t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=150)
-            final_answer = t2_res.get("content", "")
-            print(f"   ✓ Homelab Output: \"{final_answer}\" ({t2_res.get('duration_sec')}s | {t2_res.get('prompt_tokens', 0)} in, {t2_res.get('completion_tokens', 0)} out)")
-            telemetry["steps"].append({"step": "Tier_2_Homelab_Inference", "result": t2_res})
-            
-            boxes = optical_ingestion.parse_grounding_coordinates(
-                final_answer,
-                orig_w=tier2_meta.get("original_width", 1000),
-                orig_h=tier2_meta.get("original_height", 1000),
-                crop_info=tier2_meta.get("crop_info")
-            )
-            telemetry["grounding_matches"] = boxes
-            
     telemetry["final_answer"] = final_answer
     
     # Step 3: Pocket-TTS Audio Synthesis

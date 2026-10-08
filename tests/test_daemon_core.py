@@ -55,24 +55,6 @@ class TestConfig(unittest.TestCase):
         self.assertIn(config.DEVICE_TARGET, base)
 
 
-class TestCritiqueRule(unittest.TestCase):
-    def test_plain_yes_is_confident(self):
-        self.assertTrue(daemon.critique_is_confident("Yes."))
-        self.assertTrue(daemon.critique_is_confident("SIM"))
-
-    def test_no_and_unclear_are_not_confident(self):
-        for text in ("No.", "NO", "unclear", "Yes, but unclear", "Não"):
-            self.assertFalse(daemon.critique_is_confident(text), text)
-
-    def test_substring_hits_do_not_count_as_no(self):
-        # "NOTE" and "KNOWN" contain "NO" but are not a negative answer.
-        self.assertTrue(daemon.critique_is_confident("Yes. Noted and known."))
-
-    def test_empty_is_not_confident(self):
-        self.assertFalse(daemon.critique_is_confident(""))
-        self.assertFalse(daemon.critique_is_confident("No response parsed"))
-
-
 class TestShellSafety(unittest.TestCase):
     def test_smolvlm_prompt_round_trips_through_shell_parsing(self):
         nasty = "what's in the \"box\"? $(rm -rf /) `id` ; echo 'x'"

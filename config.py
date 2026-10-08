@@ -33,6 +33,14 @@ FALLBACK_LLAMA_SERVER_URL = os.getenv(
     "FALLBACK_LLAMA_SERVER_URL", "http://100.77.169.15:8085/v1/chat/completions"
 )
 VLM_MODEL = os.getenv("VLM_MODEL", "qwen2.5vl:3b")
+# The fallback URL is the RTX 5070 desktop. It is used FIRST when it answers /health (it is awake),
+# and never woken by the companion (the owner decides when it runs).
+PREFER_GPU = os.getenv("AMBIENT_PREFER_GPU", "1") == "1"
+GPU_PROBE_TTL_SEC = float(os.getenv("AMBIENT_GPU_PROBE_TTL", "15"))
+# Longest side sent to Tier 2 on the Dell CPU (prefill is ~10 visual tokens/s, so cost ~ pixels):
+# scenes 512 px (~30 s), reading 768 px (~55 s), crops up to 1024 px native. The GPU always gets 1024.
+SCENE_PX = int(os.getenv("AMBIENT_SCENE_PX", "512"))
+READ_PX = int(os.getenv("AMBIENT_READ_PX", "768"))
 
 # --- Voice ---
 # edge: pocket-tts runs on the S20 FE (Termux) and plays through paplay (default, PRJ-12 Phase 10)
