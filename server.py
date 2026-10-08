@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.4.0"
+SERVER_VERSION = "2.4.1"
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -288,20 +288,38 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             tier2_img = daemon.BENCHMARK_DIR / f"mcp_tier2_{budget_max_dim}px_{raw_img.stem}.jpg"
             _, meta = optical_ingestion.prepare_budgeted_image(raw_img, budget_max_dim, tier2_img, crop_bbox=crop_param)
             
-            qwen_res = daemon.query_tier2_qwen(tier2_img, query, max_tokens=max_tokens)
+            # Qwen2.5-VL answers boxes in absolute pixels [x1, y1, x2, y2] of the image it saw; ask for exactly
+            # that and nothing else so the reply is machine-readable (parsed with model_size below).
+            prompt = query
+            if daemon.classify_query(query) == "locate":
+                prompt = f"{query} Return ONLY the bounding box as [x1, y1, x2, y2] in pixel coordinates."
+            is_locate = prompt != query
+            model_size = optical_ingestion.qwen_input_size(
+                meta.get("processed_width", 1000), meta.get("processed_height", 1000))
+
+            def _ask(p):
+                res = daemon.query_tier2_qwen(tier2_img, p, max_tokens=max_tokens)
+                if res.get("status") != "success":
+                    return res, []
+                return res, optical_ingestion.parse_grounding_coordinates(
+                    res.get("content", ""),
+                    orig_w=meta.get("original_width", 1000),
+                    orig_h=meta.get("original_height", 1000),
+                    crop_info=meta.get("crop_info"),
+                    model_size=model_size,
+                )
+
+            qwen_res, boxes = _ask(prompt)
+            if is_locate and qwen_res.get("status") == "success" and not boxes:
+                # The model sometimes answers in prose; ask once more, strictly. The server has the image cached.
+                qwen_res, boxes = _ask(
+                    f"{query} Answer with exactly four numbers in this format and nothing else: [x1, y1, x2, y2]")
             if qwen_res.get("status") != "success":
                 return {
                     "isError": True,
                     "content": [{"type": "text", "text": f"Tier 2 Homelab Error: {qwen_res.get('error')}"}]
                 }
-                
-            boxes = optical_ingestion.parse_grounding_coordinates(
-                qwen_res.get("content", ""),
-                orig_w=meta.get("original_width", 1000),
-                orig_h=meta.get("original_height", 1000),
-                crop_info=meta.get("crop_info")
-            )
-            
+
             crop_note = ""
             if meta.get("crop_applied"):
                 ci = meta.get("crop_info", {})

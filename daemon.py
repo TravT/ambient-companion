@@ -675,7 +675,9 @@ def execute_ambient_cycle(
             final_answer,
             orig_w=tier2_meta.get("original_width", 1000),
             orig_h=tier2_meta.get("original_height", 1000),
-            crop_info=tier2_meta.get("crop_info")
+            crop_info=tier2_meta.get("crop_info"),
+            model_size=optical_ingestion.qwen_input_size(
+                tier2_meta.get("processed_width", 1000), tier2_meta.get("processed_height", 1000))
         )
 
     telemetry["final_answer"] = final_answer

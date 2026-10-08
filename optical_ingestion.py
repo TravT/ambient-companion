@@ -16,6 +16,7 @@ import time
 import subprocess
 import requests
 import json
+import math
 import re
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
@@ -281,14 +282,46 @@ def prepare_budgeted_image(
     return dest_path, meta
 
 
+def qwen_input_size(width: int, height: int, min_tokens: Optional[int] = None, factor: int = 28) -> Tuple[int, int]:
+    """Size (w, h) of the image as Qwen2.5-VL sees it after llama.cpp's resize.
+
+    Both sides are rounded to multiples of 28 (14 px patches, 2x2 merged), and images below the
+    --image-min-tokens floor are scaled up. Verified on 2026-10-07: prompt tokens = (w/28)*(h/28) + 31
+    for 297 / 598 / 1030 measured tokens on the 384 / 768 / 1024 px frames.
+    Qwen2.5-VL grounding answers are absolute pixels in THIS space, not normalized 0-1000.
+    """
+    min_tokens = config.VLM_IMAGE_MIN_TOKENS if min_tokens is None else min_tokens
+    w_bar = max(factor, int(math.floor(width / factor + 0.5)) * factor)
+    h_bar = max(factor, int(math.floor(height / factor + 0.5)) * factor)
+    min_pixels = min_tokens * factor * factor
+    if w_bar * h_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (width * height))
+        w_bar = int(math.ceil(width * beta / factor)) * factor
+        h_bar = int(math.ceil(height * beta / factor)) * factor
+    return w_bar, h_bar
+
+
+def _abs_to_norm(x1: float, y1: float, x2: float, y2: float, model_size: Tuple[int, int]) -> Tuple[int, int, int, int]:
+    """Absolute [x1, y1, x2, y2] in the model's image -> normalized 0-1000 (ymin, xmin, ymax, xmax)."""
+    mw, mh = model_size
+    clamp = lambda v: max(0, min(1000, int(round(v))))
+    return (clamp(min(y1, y2) / mh * 1000), clamp(min(x1, x2) / mw * 1000),
+            clamp(max(y1, y2) / mh * 1000), clamp(max(x1, x2) / mw * 1000))
+
+
 def parse_grounding_coordinates(
     raw_text: str,
     orig_w: int,
     orig_h: int,
-    crop_info: Optional[Dict[str, Any]] = None
+    crop_info: Optional[Dict[str, Any]] = None,
+    model_size: Optional[Tuple[int, int]] = None
 ) -> List[Dict[str, Any]]:
     """
-    Parses normalized 2D bounding boxes and points [ymin, xmin, ymax, xmax] from VLM output.
+    Parses 2D bounding boxes and points from VLM output.
+
+    With `model_size` (the image size the model saw, see qwen_input_size) the numbers are Qwen2.5-VL's
+    native absolute pixels: boxes [x1, y1, x2, y2], points [x, y]. Without it they are read as
+    normalized 0-1000 [ymin, xmin, ymax, xmax] (other model families and older callers).
     If crop_info is present, seamlessly translates local crop coordinates back to global
     coordinates of the original high-resolution optical camera frame.
     Computes exact pixel bounds, center coordinates, and spatial relation descriptors.
@@ -328,12 +361,20 @@ def parse_grounding_coordinates(
         point = item.get("point")
 
         if box and len(box) == 4:
-            ymin, xmin, ymax, xmax = [int(v) for v in box]
+            if model_size:
+                x1, y1, x2, y2 = [float(v) for v in box]
+                ymin, xmin, ymax, xmax = _abs_to_norm(x1, y1, x2, y2, model_size)
+            else:
+                ymin, xmin, ymax, xmax = [int(v) for v in box]
             results.append(_format_grounding_result(ymin, xmin, ymax, xmax, label, orig_w, orig_h, crop_info))
         elif point and len(point) == 2:
-            py, px = [int(v) for v in point]
-            ymin, xmin = max(0, py - 10), max(0, px - 10)
-            ymax, xmax = min(1000, py + 10), min(1000, px + 10)
+            if model_size:
+                px_abs, py_abs = [float(v) for v in point]
+                ymin, xmin, ymax, xmax = _abs_to_norm(px_abs - 5, py_abs - 5, px_abs + 5, py_abs + 5, model_size)
+            else:
+                py, px = [int(v) for v in point]
+                ymin, xmin = max(0, py - 10), max(0, px - 10)
+                ymax, xmax = min(1000, py + 10), min(1000, px + 10)
             results.append(_format_grounding_result(ymin, xmin, ymax, xmax, label, orig_w, orig_h, crop_info))
 
     # 2. Regex fallback for bracketed coordinates: [ymin, xmin, ymax, xmax]
@@ -341,9 +382,14 @@ def parse_grounding_coordinates(
         pattern = r"\[\s*(\d{1,4})\s*,\s*(\d{1,4})\s*,\s*(\d{1,4})\s*,\s*(\d{1,4})\s*\]"
         matches = re.finditer(pattern, raw_text)
         for m in matches:
-            ymin, xmin, ymax, xmax = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-            if ymin <= 1000 and xmin <= 1000 and ymax <= 1000 and xmax <= 1000:
+            a, b, c, d = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            if model_size:
+                ymin, xmin, ymax, xmax = _abs_to_norm(a, b, c, d, model_size)
                 results.append(_format_grounding_result(ymin, xmin, ymax, xmax, "detected_item", orig_w, orig_h, crop_info))
+            else:
+                ymin, xmin, ymax, xmax = a, b, c, d
+                if ymin <= 1000 and xmin <= 1000 and ymax <= 1000 and xmax <= 1000:
+                    results.append(_format_grounding_result(ymin, xmin, ymax, xmax, "detected_item", orig_w, orig_h, crop_info))
 
     return results
 
@@ -405,7 +451,10 @@ def _format_grounding_result(
         "box_2d_norm": [global_ymin, global_xmin, global_ymax, global_xmax],
         "box_2d_pixels": [p_ymin, p_xmin, p_ymax, p_xmax],
         "center_norm": [center_norm_y, center_norm_x],
-        "center_pixels": [center_pixel_y, center_pixel_x],
+        "center_pixels": [center_pixel_y, center_pixel_x],   # [y, x] (kept for compatibility)
+        "box_xyxy_pixels": [p_xmin, p_ymin, p_xmax, p_ymax],  # [x1, y1, x2, y2] on the original canvas
+        "click_x": center_pixel_x,
+        "click_y": center_pixel_y,
         "spatial_location": spatial_desc,
         "remapped_from_crop": remapped
     }

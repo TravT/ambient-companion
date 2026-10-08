@@ -151,7 +151,7 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | :--- | :--- | :--- |
 | `ambient_escalation_cycle` | Routed answer (GPU when awake, else by question shape), spoken cue while the Dell works, and the answer spoken on the phone. Supports `crop_bbox` for focused macro zoom. | `query` (str), `source` (str), `language` ("auto"\|"en"\|"pt"), `crop_bbox` (list[int]), `play_audio` (bool) |
 | `ambient_triage_scene` | Tier 1 Edge triage strictly on Snapdragon 865 CPU (<8s, 0 cloud tokens). **Cannot read fine text.** | `query` (str), `source` (str), `crop_bbox` (list[int]) |
-| `ambient_ocr_and_grounding` | Tier 2 Homelab inference (Qwen2.5-VL-3B). High-precision reading, pill labels, and 2D bounding boxes. Supports RoI Crop-on-Demand with automatic parent coordinate remapping. | `query` (str), `source` (str), `crop_bbox` (list[int]), `max_tokens` (int) |
+| `ambient_ocr_and_grounding` | Tier 2 Homelab inference (Qwen2.5-VL-3B). High-precision reading, pill labels, and 2D bounding boxes. Supports RoI Crop-on-Demand with automatic parent coordinate remapping. Returns `click_x` / `click_y` pixel targets for locate questions. | `query` (str), `source` (str), `crop_bbox` (list[int]), `max_tokens` (int) |
 | `ambient_speak` | Kyutai Pocket-TTS voice cloning (<150ms TTFA) + S20 FE stereo speaker playback. | `text` (str), `language` ("en"\|"pt") |
 | `ambient_hardware_status` | Telemetry: battery percentage, temperature (<40.0°C safety breaker), ADB state, and llama-server health. | *None* |
 
@@ -178,6 +178,12 @@ When reading fine text (medication labels, credit card digits, IC chips), downsa
 | **Preprocessing Latency** | 200.5 ms | 76.8 ms | **2.6x Faster Ingestion** |
 | **Coordinate Remapping** | None (Canvas level) | Global 12MP Remapped | **Sub-pixel Grounding** |
 
+
+---
+
+### Grounding coordinate format (fixed in v1.4.1)
+
+Qwen2.5-VL answers boxes as **absolute pixels `[x1, y1, x2, y2]` in the image it saw**, after llama.cpp resizes it to multiples of 28 (and up to the `--image-min-tokens` floor, `VLM_IMAGE_MIN_TOKENS`, default 256). Before 1.4.1 the parser read them as normalized 0-1000 `[ymin, xmin, ymax, xmax]`, so boxes were hundreds of pixels off (measured on a mock login page with known positions: 208 to 395 px; after the fix 2 to 10 px at 512 px). `optical_ingestion.qwen_input_size()` reproduces the resize (verified against 297 / 598 / 1030 measured prompt tokens) and `parse_grounding_coordinates(..., model_size=...)` converts. Results now include `click_x`, `click_y` and `box_xyxy_pixels` on the original canvas (the older `center_pixels` stays `[y, x]`). Locate questions ask for "only the bounding box as [x1, y1, x2, y2]", with one stricter retry if the model answers in prose.
 
 ---
 

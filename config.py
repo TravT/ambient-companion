@@ -46,6 +46,9 @@ GPU_PROBE_TTL_SEC = float(os.getenv("AMBIENT_GPU_PROBE_TTL", "15"))
 # Longest side sent to Tier 2 on the Dell CPU (prefill is ~10 visual tokens/s, so cost ~ pixels):
 # scenes 512 px (~30 s), reading 768 px (~55 s), crops up to 1024 px native. The GPU always gets 1024.
 SCENE_PX = int(os.getenv("AMBIENT_SCENE_PX", "512"))
+# llama-server --image-min-tokens on every Tier 2 backend (Dell job, satellite service): it decides how the
+# image is resized before the model sees it, which the grounding coordinates are relative to.
+VLM_IMAGE_MIN_TOKENS = int(os.getenv("VLM_IMAGE_MIN_TOKENS", "256"))
 READ_PX = int(os.getenv("AMBIENT_READ_PX", "768"))
 
 # --- Voice ---
