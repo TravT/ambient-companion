@@ -511,7 +511,9 @@ def ensure_edge_audio(force: bool = False) -> bool:
     """Make sure the phone can play sound; restart a hung PulseAudio (alive but refusing connections).
 
     A plain `pulseaudio --start` does nothing when the old daemon is hung ("Daemon already running"),
-    so recovery is: hard kill, remove the stale pid file, start with the AAudio sink. Cached for 60 s.
+    so recovery is: hard kill, remove the stale pid file, start a minimal daemon (only the unix socket and the
+    AAudio sink; the default config also loads module-suspend-on-idle, which closes the AAudio stream when idle
+    and was followed by hangs). Cached for 60 s.
     """
     global _audio_ok_until
     if not force and time.time() < _audio_ok_until:
@@ -520,7 +522,8 @@ def ensure_edge_audio(force: bool = False) -> bool:
     recover = (
         "pkill -9 pulseaudio; sleep 1; "
         f"find {PHONE_PREFIX}/tmp -maxdepth 2 -path '*/pulse-*/pid' -delete; "
-        "pulseaudio --start --exit-idle-time=-1 --load=module-aaudio-sink; sleep 2"
+        "pulseaudio -n --daemonize=yes --exit-idle-time=-1 --load=module-native-protocol-unix "
+        "--load=module-aaudio-sink; sleep 2"
     )
     out, _ = run_edge_command(f"{check} || {{ {recover}; }}; {check} && echo AUDIO_OK || echo AUDIO_DOWN", timeout=45)
     ok = out.strip().endswith("AUDIO_OK")

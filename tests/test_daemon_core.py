@@ -265,6 +265,11 @@ class TestPhoneAudio(unittest.TestCase):
         cmd = seen[0]
         self.assertIn("pkill -9 pulseaudio", cmd)
         self.assertIn("module-aaudio-sink", cmd)
+        # Minimal daemon: no default.pa, so module-suspend-on-idle is never loaded. With it the AAudio stream was
+        # closed after idle and the daemon hung within ~16 min; without it a 30 min monitor saw zero failures.
+        self.assertIn("pulseaudio -n ", cmd)
+        self.assertIn("module-native-protocol-unix", cmd)
+        self.assertNotIn("suspend-on-idle", cmd.replace("module-suspend-on-idle is never loaded", ""))
         self.assertIn("-path '*/pulse-*/pid' -delete", cmd)         # stale pid file removed by exact pattern
 
     def test_every_pactl_call_has_a_timeout_so_a_hung_daemon_cannot_block_the_cycle(self):

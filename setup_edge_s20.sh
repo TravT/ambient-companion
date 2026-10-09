@@ -66,7 +66,8 @@ if ! pactl info >/dev/null 2>&1; then
     pkill -9 pulseaudio 2>/dev/null || true
     sleep 1
     find "${PREFIX}/tmp" -maxdepth 2 -path '*/pulse-*/pid' -delete 2>/dev/null || true
-    pulseaudio --start --exit-idle-time=-1 --load="module-aaudio-sink" 2>/dev/null || true
+    # Minimal daemon (no default.pa): module-suspend-on-idle closes the AAudio stream when idle and hangs the daemon.
+    pulseaudio -n --daemonize=yes --exit-idle-time=-1 --load=module-native-protocol-unix --load=module-aaudio-sink 2>/dev/null || true
 fi
 pactl info | grep -E "Server Name|Default Sink" || echo "PulseAudio running."
 
