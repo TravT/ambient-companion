@@ -137,6 +137,7 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | `AMBIENT_HOST` / `AMBIENT_PORT` | `127.0.0.1` / `8089` | HTTP listener |
 | `AMBIENT_API_TOKEN` | empty (auth off) | Bearer token for `POST /mcp` |
 | `SATELLITE_LLAMA_SERVER_URL` | `http://100.105.6.62:8090/v1/chat/completions` | MateBook satellite llama-server (`satellite_vlm` Ansible role, tailnet only, about 2x the Dell). Probed with `/health`, never woken; `""` disables |
+| `FALLBACK_LLAMA_SERVER_URLS` | Omarchy `http://100.102.231.37:8085/...`, then Windows `http://100.77.169.15:8085/...` | The RTX 5070 desktop is one dual-boot rig with two tailnet identities; the first URL whose `/health` answers is used (only one OS side is online at a time). A single `FALLBACK_LLAMA_SERVER_URL` still works |
 | `AMBIENT_PREFER_GPU` / `AMBIENT_GPU_PROBE_TTL` | `1` / `15` | Use the RTX 5070 desktop first when its `/health` answers (probed, never woken); probe cache in seconds |
 | `AMBIENT_SCENE_PX` / `AMBIENT_READ_PX` / `AMBIENT_GROUND_PX` | `512` / `768` / `1024` | Longest side sent to Tier 2 for scenes, for reading and for locate questions (crops go up to 1024; the GPU always gets 1024). Locate needs 1024: click error was 7-60 px at 512, 10-173 px at 768 and 0-6 px at 1024 |
 | `AMBIENT_RETENTION_DAYS` | `7` | Age after which cached frames/WAVs are deleted |

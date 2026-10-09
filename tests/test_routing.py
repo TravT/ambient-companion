@@ -65,7 +65,35 @@ class TestBackendLadder(unittest.TestCase):
         with mock.patch.object(daemon.requests, "get", return_value=mock.Mock(status_code=200)) as get:
             self.assertTrue(daemon.backend_up("gpu"))
         self.assertTrue(get.call_args.args[0].endswith("/health"))
-        self.assertIn("100.77.169.15", get.call_args.args[0])
+        self.assertIn("100.102.231.37", get.call_args.args[0])      # Omarchy side is probed first
+
+    def test_gpu_list_defaults_to_omarchy_then_windows(self):
+        self.assertEqual([u.split("//")[1].split(":")[0] for u in daemon.GPU_SERVER_URLS],
+                         ["100.102.231.37", "100.77.169.15"])
+        self.assertEqual(daemon.FALLBACK_LLAMA_SERVER_URL, daemon.GPU_SERVER_URLS[0])
+
+    def test_windows_side_is_used_when_only_it_is_up(self):
+        def fake_get(url, timeout=None):
+            return mock.Mock(status_code=200 if "100.77.169.15" in url else 500)
+        with mock.patch.object(daemon.requests, "get", fake_get):
+            self.assertTrue(daemon.backend_up("gpu"))
+            self.assertIn("100.77.169.15", daemon.active_gpu_url())
+            self.assertEqual(daemon.tier2_endpoints()[0], daemon.GPU_SERVER_URLS[1])
+
+    def test_omarchy_side_wins_when_both_answer(self):
+        with mock.patch.object(daemon.requests, "get", return_value=mock.Mock(status_code=200)):
+            daemon.backend_up("gpu")
+            self.assertIn("100.102.231.37", daemon.active_gpu_url())
+
+    def test_both_gpu_sides_down_is_not_up(self):
+        with mock.patch.object(daemon.requests, "get", side_effect=OSError("down")):
+            self.assertFalse(daemon.backend_up("gpu"))
+            self.assertIsNone(daemon.active_gpu_url())
+
+    def test_url_list_parsing(self):
+        self.assertEqual(config.parse_url_list(" http://a/v1/x , ,http://b/v1/x,http://a/v1/x "),
+                         ["http://a/v1/x", "http://b/v1/x"])
+        self.assertEqual(config.parse_url_list(""), [])
 
     def test_satellite_probe_uses_its_own_url(self):
         with mock.patch.object(daemon.requests, "get", return_value=mock.Mock(status_code=200)) as get:

@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.4.3"
+SERVER_VERSION = "2.5.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -79,6 +79,7 @@ def readiness() -> dict:
         "llama_server": llama_ok,
         "gpu_node": backends["gpu"],
         "backends": backends,
+        "gpu_url": daemon.active_gpu_url(),
         "tts_available": daemon.tts_available(),
     }
 

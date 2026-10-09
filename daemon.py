@@ -62,6 +62,7 @@ CONTAINER_IP = config.ADB_GATEWAY_HOST
 DEVICE_TARGET = config.DEVICE_TARGET
 LLAMA_SERVER_URL = config.LLAMA_SERVER_URL
 FALLBACK_LLAMA_SERVER_URL = config.FALLBACK_LLAMA_SERVER_URL
+GPU_SERVER_URLS = config.GPU_SERVER_URLS
 SATELLITE_LLAMA_SERVER_URL = config.SATELLITE_LLAMA_SERVER_URL
 MAX_SAFE_TEMP_C = config.MAX_SAFE_TEMP_C
 
@@ -282,29 +283,45 @@ def health_url(chat_url: str) -> str:
     return chat_url.split("/v1/", 1)[0].rstrip("/") + "/health"
 
 
+_active_gpu_url: Optional[str] = None
+
+
+def _health_ok(chat_url: str) -> bool:
+    try:
+        return requests.get(health_url(chat_url), timeout=(0.6, 1.5)).status_code == 200
+    except Exception:
+        return False
+
+
+def active_gpu_url() -> Optional[str]:
+    """The GPU desktop endpoint that answered the last probe (Omarchy side first), or None."""
+    return _active_gpu_url
+
+
 def backend_up(name: str) -> bool:
     """True when the optional Tier 2 backend ("gpu" desktop or "satellite") answers /health right now.
 
-    Probe only: the companion never wakes either machine. Results are cached briefly.
+    Probe only: the companion never wakes either machine. Results are cached briefly. The "gpu" backend is
+    a list of URLs (the two OS sides of the desktop); the first that answers is the active one.
     """
+    global _active_gpu_url
     if name == "gpu":
-        url = FALLBACK_LLAMA_SERVER_URL if config.PREFER_GPU else ""
+        urls = [u for u in GPU_SERVER_URLS if u and u != LLAMA_SERVER_URL] if config.PREFER_GPU else []
     elif name == "satellite":
-        url = SATELLITE_LLAMA_SERVER_URL
+        urls = [SATELLITE_LLAMA_SERVER_URL] if SATELLITE_LLAMA_SERVER_URL and SATELLITE_LLAMA_SERVER_URL != LLAMA_SERVER_URL else []
     else:
         return False
-    if not url or url == LLAMA_SERVER_URL:
+    if not urls:
         return False
     now = time.time()
     probed_at, last = _probe_cache.get(name, (0.0, False))
     if now - probed_at < config.GPU_PROBE_TTL_SEC:
         return last
-    try:
-        up = requests.get(health_url(url), timeout=(0.6, 1.5)).status_code == 200
-    except Exception:
-        up = False
-    _probe_cache[name] = (now, up)
-    return up
+    chosen = next((u for u in urls if _health_ok(u)), None)
+    if name == "gpu":
+        _active_gpu_url = chosen
+    _probe_cache[name] = (now, chosen is not None)
+    return chosen is not None
 
 
 def best_backend() -> str:
@@ -319,7 +336,7 @@ def tier2_endpoints() -> List[str]:
     """Tier 2 chat endpoints in preference order; the Dell CPU server is always the last resort."""
     urls = []
     if backend_up("gpu"):
-        urls.append(FALLBACK_LLAMA_SERVER_URL)
+        urls.append(_active_gpu_url or FALLBACK_LLAMA_SERVER_URL)
     if backend_up("satellite"):
         urls.append(SATELLITE_LLAMA_SERVER_URL)
     urls.append(LLAMA_SERVER_URL)

@@ -29,9 +29,25 @@ DROIDCAM_URL = os.getenv("DROIDCAM_URL", "http://100.115.165.41:4747/cam/1/frame
 
 # --- Tier 2 (llama-server hosting Qwen2.5-VL) ---
 LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:8085/v1/chat/completions")
-FALLBACK_LLAMA_SERVER_URL = os.getenv(
-    "FALLBACK_LLAMA_SERVER_URL", "http://100.77.169.15:8085/v1/chat/completions"
+def parse_url_list(raw: str) -> List[str]:
+    """Comma separated URLs -> ordered list without blanks or duplicates."""
+    seen: List[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part and part not in seen:
+            seen.append(part)
+    return seen
+
+
+# The RTX 5070 desktop is one dual-boot rig with two tailnet identities; only one OS side is online at a time.
+# Probed in this order: Omarchy (100.102.231.37), then Windows (100.77.169.15). FALLBACK_LLAMA_SERVER_URL is kept
+# as the single-URL override from before the Omarchy side existed.
+GPU_SERVER_URLS = parse_url_list(
+    os.getenv("FALLBACK_LLAMA_SERVER_URLS")
+    or os.getenv("FALLBACK_LLAMA_SERVER_URL")
+    or "http://100.102.231.37:8085/v1/chat/completions,http://100.77.169.15:8085/v1/chat/completions"
 )
+FALLBACK_LLAMA_SERVER_URL = GPU_SERVER_URLS[0] if GPU_SERVER_URLS else ""
 VLM_MODEL = os.getenv("VLM_MODEL", "qwen2.5vl:3b")
 # The fallback URL is the RTX 5070 desktop. It is used FIRST when it answers /health (it is awake),
 # and never woken by the companion (the owner decides when it runs).

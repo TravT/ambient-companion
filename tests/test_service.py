@@ -118,6 +118,7 @@ class TestReadiness(unittest.TestCase):
             report = server.readiness()
         self.assertTrue(report["gpu_node"])
         self.assertEqual(report["backends"], {"gpu": True, "satellite": True, "homelab": True})
+        self.assertIn("gpu_url", report)
 
     def test_llama_health_url_derived_from_chat_endpoint(self):
         with mock.patch.object(daemon, "LLAMA_SERVER_URL", "http://10.0.0.5:9000/v1/chat/completions"):
