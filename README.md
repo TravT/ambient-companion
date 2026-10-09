@@ -197,6 +197,7 @@ When reading fine text (medication labels, credit card digits, IC chips), downsa
 ### Follow-ups and speech (v1.6.0)
 * **Follow-ups on the same scene:** the Tier 2 request puts the image before the text, so llama-server keeps the image tokens when only the question changes. Pass `reuse_last_frame: true` (cycle, triage and grounding tools) to skip the capture too. Measured on the satellite: different questions on one frame 13-15 s with the text first, 0.6-2 s with the image first; end to end a follow-up took 1.1 s. A yes/no follow-up skips the phone's SmolVLM and goes to Tier 2, where the image is cached.
 * **The "let me look closer" cue** is spoken only if Tier 2 has not answered after 3 s (`AMBIENT_CUE_DELAY`), so a fast or cached answer never waits for it.
+* **Where the time goes:** every cycle returns `phase_sec` (thermal, acquire, prepare, tier2, speech, final_temp). On the satellite a 7-word spoken follow-up is ~0.5 s Tier 2 and ~6 s speech: the phone synthesizes at roughly 2 words per second, so speech is the limit now.
 * **Speech:** the first sentence (or about 28 words) is spoken, in chunks that are synthesized while the previous chunk plays, so audio starts after about 4 s instead of ~10 s.
 * **Playback is judged by `paplay`'s exit code**, and the companion restarts a hung PulseAudio on the phone (alive but refusing connections: hard kill, remove the stale pid file, start the AAudio sink) before speaking. `/ready` reports `audio`.
 

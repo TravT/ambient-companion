@@ -756,7 +756,10 @@ def execute_ambient_cycle(
         print(f"• RoI Crop   : {crop_bbox} (Optical Macro Zoom)")
 
     # Step 0: Check Edge Device Thermal State
+    phase: Dict[str, float] = {}
+    t_phase = time.time()
     temp_c = get_edge_temperature()
+    phase["thermal"] = round(time.time() - t_phase, 2)
     if temp_c is None:
         print("🚨 EDGE UNREACHABLE: cannot read S20 FE temperature over ADB. Aborting (fail closed).")
         return {"status": "aborted_edge_unreachable", "adb_target": f"{CONTAINER_IP} -> {DEVICE_TARGET}"}
@@ -773,11 +776,14 @@ def execute_ambient_cycle(
     t0_opt = time.time()
     raw_img = acquire_frame(source, reuse_last_frame)
     opt_dur = round(time.time() - t0_opt, 2)
+    phase["acquire"] = opt_dur
     print(f"   ✓ Acquired: {raw_img.name} ({opt_dur}s)")
 
+    t_phase = time.time()
     tier2_img_local = BENCHMARK_DIR / f"daemon_tier2_{plan['tier2_px']}px_{raw_img.stem}.jpg"
     _, tier2_meta = optical_ingestion.prepare_budgeted_image(
         raw_img, plan["tier2_px"], tier2_img_local, crop_bbox=crop_bbox)
+    phase["prepare"] = round(time.time() - t_phase, 2)
 
     telemetry = {
         "query": query,
@@ -849,7 +855,9 @@ def execute_ambient_cycle(
             cue_timer.start()
 
         print(f"   🏠 Querying Tier 2 llama-server ({plan['tier2_px']}px, backend {plan['tier2_backend']})...")
+        t_phase = time.time()
         t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=150)
+        phase["tier2"] = round(time.time() - t_phase, 2)
         if cue_timer is not None:
             cue_timer.cancel()
             cue_thread = cue_holder.get("t")
@@ -876,13 +884,20 @@ def execute_ambient_cycle(
         
         print(f"\n🎵 [Voice] Speaking via Pocket-TTS ({lang.upper()}, mode={config.TTS_MODE})...")
         print(f"   Speech Prompt: \"{speech_text}\"")
+        t_phase = time.time()
         speech = speak(speech_text, lang)
+        phase["speech"] = round(time.time() - t_phase, 2)
         telemetry["steps"].append({"step": "Speech", "result": speech})
         if speech.get("played"):
             print("   ✓ Spoken on the S20 FE at ~30% volume.")
 
-    telemetry["total_latency_sec"] = round(time.time() - cycle_start, 2)
+    t_phase = time.time()
     telemetry["temp_end_c"] = get_edge_temperature()
+    phase["final_temp"] = round(time.time() - t_phase, 2)
+    for key in ("thermal", "acquire", "prepare", "tier2", "speech"):
+        phase.setdefault(key, 0.0)              # phases that did not run (no speech, edge answer, ...)
+    telemetry["phase_sec"] = phase
+    telemetry["total_latency_sec"] = round(time.time() - cycle_start, 2)
     end_temp = f"{telemetry['temp_end_c']:.1f}°C" if telemetry["temp_end_c"] is not None else "n/a"
     print(f"\n🎉 [Cycle Complete] Total Latency: {telemetry['total_latency_sec']}s | End Temp: {end_temp}")
     return telemetry

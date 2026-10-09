@@ -341,6 +341,13 @@ class TestCycleRouting(unittest.TestCase):
         spoken = [c.args[0] for c in self.speak.call_args_list]
         self.assertEqual(len(spoken), 1)               # only the final answer
 
+    def test_cycle_reports_where_the_time_went(self):
+        res = self.run_cycle("What is on the desk?", play_audio=True)
+        phases = res["phase_sec"]
+        for key in ("thermal", "acquire", "prepare", "tier2", "speech", "final_temp"):
+            self.assertIn(key, phases)
+            self.assertGreaterEqual(phases[key], 0.0)
+
     def test_audio_off_never_speaks(self):
         self.run_cycle("What is on the desk?", play_audio=False)
         self.speak.assert_not_called()
