@@ -317,16 +317,24 @@ class TestCycleRouting(unittest.TestCase):
 
         self.t2.side_effect = slow_tier2
         self.speak.side_effect = fake_speak
-        self.run_cycle("What is on the desk?", play_audio=True)
+        with mock.patch.object(config, "CUE_DELAY_SEC", 0.05):
+            self.run_cycle("What is on the desk?", play_audio=True)
         self.assertEqual(order, ["cue", "tier2_done", "answer"])
 
-    def test_satellite_awake_labels_the_tier_and_still_speaks_the_cue(self):
+    def test_no_cue_when_tier2_answers_quickly(self):
+        # the default Tier 2 mock returns at once: a cue would only delay the answer
+        with mock.patch.object(config, "CUE_DELAY_SEC", 0.5):
+            self.run_cycle("What is on the desk?", play_audio=True)
+        spoken = [c.args[0] for c in self.speak.call_args_list]
+        self.assertEqual(spoken, ["A desk."])
+
+    def test_satellite_awake_labels_the_tier_and_skips_the_cue_when_it_answers_fast(self):
         res = self.run_cycle("What is on the desk?", satellite=True, play_audio=True)
         self.edge.assert_not_called()
         self.assertEqual(res["resolution_tier"], "Tier 2 (Satellite)")
         self.assertEqual(res["route"]["backend"], "satellite")
         spoken = [c.args[0] for c in self.speak.call_args_list]
-        self.assertEqual(len(spoken), 2)               # the cue (14 s wait) and the answer
+        self.assertEqual(spoken, ["A desk."])              # the cue only plays if Tier 2 is slow
 
     def test_no_cue_when_the_gpu_answers_fast(self):
         self.run_cycle("What is on the desk?", gpu=True, play_audio=True)

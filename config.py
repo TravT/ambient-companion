@@ -106,6 +106,8 @@ API_TOKEN = os.getenv("AMBIENT_API_TOKEN", "")
 HARDWARE_LOCK_TIMEOUT_SEC = float(os.getenv("AMBIENT_LOCK_TIMEOUT", "240"))
 
 # --- Follow-ups and spoken answers ---
+# The "let me look closer" cue is spoken only if Tier 2 has not answered after this many seconds.
+CUE_DELAY_SEC = float(os.getenv("AMBIENT_CUE_DELAY", "3.0"))
 # A follow-up on the same frame can skip the capture and re-use the Tier 2 server's image cache.
 LAST_FRAME_TTL_SEC = float(os.getenv("AMBIENT_LAST_FRAME_TTL", "60"))
 # Spoken answers: the first sentence, cut at this many words (the full answer is still returned as text).

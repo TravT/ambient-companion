@@ -831,19 +831,30 @@ def execute_ambient_cycle(
         else:
             telemetry["resolution_tier"] = "Tier 2 (Direct)"
 
-        # The CPU path takes tens of seconds: say something while it runs. The GPU answers
-        # in about a second, so a cue would only delay the answer.
+        # A slow Tier 2 (CPU) gets a spoken cue, but only once it has really taken CUE_DELAY_SEC: a fast or
+        # cached answer must not wait for a cue to finish playing.
         cue_thread = None
+        cue_timer = None
         if play_audio and plan["tier2_backend"] != "gpu":
             cue_text = "Let me look closer." if lang == "en" else "Deixe-me olhar com mais atenção."
-            print(f"   🗣️  [Voice Cue]: \"{cue_text}\"")
-            cue_thread = threading.Thread(target=speak, args=(cue_text, lang), daemon=True)
-            cue_thread.start()
+            cue_holder: dict = {}
+
+            def start_cue() -> None:
+                print(f"   🗣️  [Voice Cue]: \"{cue_text}\"")
+                cue_holder["t"] = threading.Thread(target=speak, args=(cue_text, lang), daemon=True)
+                cue_holder["t"].start()
+
+            cue_timer = threading.Timer(config.CUE_DELAY_SEC, start_cue)
+            cue_timer.daemon = True
+            cue_timer.start()
 
         print(f"   🏠 Querying Tier 2 llama-server ({plan['tier2_px']}px, backend {plan['tier2_backend']})...")
         t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=150)
-        if cue_thread is not None:
-            cue_thread.join(timeout=30)
+        if cue_timer is not None:
+            cue_timer.cancel()
+            cue_thread = cue_holder.get("t")
+            if cue_thread is not None:
+                cue_thread.join(timeout=30)
         final_answer = t2_res.get("content", "")
         print(f"   ✓ Tier 2 Output: \"{final_answer}\" ({t2_res.get('duration_sec')}s | {t2_res.get('prompt_tokens', 0)} in, {t2_res.get('completion_tokens', 0)} out)")
         telemetry["steps"].append({"step": "Tier_2_Inference", "result": t2_res})
