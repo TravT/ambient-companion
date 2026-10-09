@@ -267,6 +267,20 @@ class TestPhoneAudio(unittest.TestCase):
         self.assertIn("module-aaudio-sink", cmd)
         self.assertIn("-path '*/pulse-*/pid' -delete", cmd)         # stale pid file removed by exact pattern
 
+    def test_every_pactl_call_has_a_timeout_so_a_hung_daemon_cannot_block_the_cycle(self):
+        seen = []
+
+        def fake(cmd, timeout=45, as_root=False):
+            seen.append(cmd)
+            return "AUDIO_OK", 0.1
+
+        with mock.patch.object(daemon, "run_edge_command", fake):
+            daemon.ensure_edge_audio(force=True)
+            daemon.edge_audio_ok()
+        for cmd in seen:
+            self.assertNotRegex(cmd, r"(?<!timeout \d )pactl info")
+            self.assertIn("timeout 4 pactl info", cmd)
+
     def test_audio_down_after_recovery_is_reported(self):
         with mock.patch.object(daemon, "run_edge_command", return_value=("AUDIO_DOWN", 0.1)):
             self.assertFalse(daemon.ensure_edge_audio(force=True))

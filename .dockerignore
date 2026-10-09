@@ -1,9 +1,10 @@
+eval
 .git
 .github
 .gitignore
-**/__pycache__
-*.pyc
-tests
 *.md
-setup_*.sh
+*.pyc
+**/__pycache__
 setup_*.bat
+setup_*.sh
+tests

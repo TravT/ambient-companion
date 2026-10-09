@@ -363,7 +363,7 @@ def plan_route(query: str, crop_bbox: Optional[List[int]] = None, reuse_last: bo
     return {"kind": kind, "backend": "edge", "tier2_backend": best, "tier2_px": config.SCENE_PX}
 
 
-def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> dict:
+def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150, endpoints: Optional[List[str]] = None) -> dict:
     """
     Queries Tier 2 llama-server hosting Qwen2.5-VL-3B.
     Supports cold-start 503 retry resilience, token usage tracking, and automatic endpoint fallback
@@ -389,7 +389,7 @@ def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> di
         "temperature": 0.2
     }
     
-    endpoints = tier2_endpoints()
+    endpoints = endpoints or tier2_endpoints()      # explicit list = benchmark one backend, no ladder
         
     last_err = None
     t0 = time.time()
@@ -491,7 +491,7 @@ _audio_ok_until = 0.0
 
 def edge_audio_ok() -> bool:
     """True when PulseAudio on the phone accepts connections (read-only check)."""
-    out, _ = run_edge_command("pactl info >/dev/null 2>&1 && echo AUDIO_OK || echo AUDIO_DOWN", timeout=10)
+    out, _ = run_edge_command("timeout 4 pactl info >/dev/null 2>&1 && echo AUDIO_OK || echo AUDIO_DOWN", timeout=12)
     return out.strip().endswith("AUDIO_OK")
 
 
@@ -504,7 +504,7 @@ def ensure_edge_audio(force: bool = False) -> bool:
     global _audio_ok_until
     if not force and time.time() < _audio_ok_until:
         return True
-    check = "pactl info >/dev/null 2>&1"
+    check = "timeout 4 pactl info >/dev/null 2>&1"      # a hung daemon answers "Timeout" after a long wait
     recover = (
         "pkill -9 pulseaudio; sleep 1; "
         f"find {PHONE_PREFIX}/tmp -maxdepth 2 -path '*/pulse-*/pid' -delete; "

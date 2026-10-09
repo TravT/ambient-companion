@@ -66,6 +66,8 @@ dev/ambient-companion/
 ├── http_service.py            # HTTP front-end: /health, /ready, POST /mcp (bearer token)
 ├── optical_ingestion.py       # Pluggable multi-source optical acquisition engine
 ├── config.py                  # Environment-driven settings (no host paths in code)
+├── listen.py                  # push-to-talk capture from the phone mic (tinycap over ADB, end-of-speech detector)
+├── eval/                      # evaluation harness: synthetic set, runner, scoring (see eval/README.md)
 ├── housekeeping.py            # Retention for frames/WAVs (host cache + S20 Download)
 ├── Dockerfile                 # Non-root slim image (HTTP + MCP service)
 ├── requirements.txt           # Core deps (pillow, requests)

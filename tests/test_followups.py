@@ -185,3 +185,21 @@ class TestChunkedSpeech(unittest.TestCase):
             res = daemon.speak("The scene shows a street with a yellow car parked on the side of the road.", "en")
         single.assert_called_once()
         self.assertEqual(res["status"], "error")
+
+
+class TestExplicitEndpoint(unittest.TestCase):
+    def test_query_can_target_one_backend_for_benchmarking(self):
+        seen = []
+
+        def fake_post(url, json=None, timeout=None):
+            seen.append(url)
+            return mock.Mock(status_code=200, json=lambda: {"choices": [{"message": {"content": "ok"}}], "usage": {}})
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(daemon, "tier2_endpoints", side_effect=AssertionError("ladder must not be used")), \
+                mock.patch.object(daemon.requests, "post", fake_post):
+            img = Path(d) / "a.jpg"
+            Image.new("RGB", (32, 32)).save(img)
+            res = daemon.query_tier2_qwen(img, "q", endpoints=["http://only-this/v1/chat/completions"])
+        self.assertEqual(seen, ["http://only-this/v1/chat/completions"])
+        self.assertEqual(res["endpoint"], "http://only-this/v1/chat/completions")
