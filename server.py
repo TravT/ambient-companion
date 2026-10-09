@@ -308,10 +308,9 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             
             # Qwen2.5-VL answers boxes in absolute pixels [x1, y1, x2, y2] of the image it saw; ask for exactly
             # that and nothing else so the reply is machine-readable (parsed with model_size below).
-            prompt = query
-            if daemon.classify_query(query) == "locate":
-                prompt = f"{query} Return ONLY the bounding box as [x1, y1, x2, y2] in pixel coordinates."
-            is_locate = prompt != query
+            kind = daemon.classify_query(query)
+            prompt = daemon.prompt_for(kind, query)
+            is_locate = kind == "locate"
             model_size = optical_ingestion.qwen_input_size(
                 meta.get("processed_width", 1000), meta.get("processed_height", 1000))
 

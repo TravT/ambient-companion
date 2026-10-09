@@ -35,7 +35,12 @@ import daemon
 import optical_ingestion as oi
 from eval import scoring
 
-LOCATE_SUFFIX = " Return ONLY the bounding box as [x1, y1, x2, y2] in pixel coordinates."
+KIND_TO_ROUTE = {"read": "ocr", "locate": "locate"}
+
+
+def question_prompt(q: Dict[str, Any]) -> str:
+    """Exactly what the companion would send for this question kind."""
+    return daemon.prompt_for(KIND_TO_ROUTE.get(q.get("kind", "describe"), q.get("kind", "describe")), q["q"])
 
 
 def load_cases(path: Path) -> List[Dict[str, Any]]:
@@ -70,11 +75,12 @@ def score_question(q: Dict[str, Any], answer: str, boxes: List[Dict[str, Any]]) 
     return scoring.score_keywords(answer, q.get("all_of", []), q.get("any_of", []))
 
 
-def run(cases_file: Path, backends: List[str], sizes: List[int], limit: Optional[int], out: Path) -> List[Dict[str, Any]]:
+def run(cases_file: Path, backends: List[str], sizes: List[int], limit: Optional[int], out: Path,
+        only: Optional[str] = None) -> List[Dict[str, Any]]:
     urls = backend_urls()
     live = [b for b in backends if urls.get(b)]
     print(f"backends asked: {backends} | answering now: {live} | skipped: {[b for b in backends if b not in live]}", flush=True)
-    cases = load_cases(cases_file)[: limit or None]
+    cases = [c for c in load_cases(cases_file) if not only or only in c["id"]][: limit or None]
     scratch = out.parent / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
     rows: List[Dict[str, Any]] = []
@@ -86,7 +92,7 @@ def run(cases_file: Path, backends: List[str], sizes: List[int], limit: Optional
                 model_size = oi.qwen_input_size(meta["processed_width"], meta["processed_height"])
                 for backend in live:
                     for n, q in enumerate(case["questions"]):
-                        prompt = q["q"] + (LOCATE_SUFFIX if q.get("kind") == "locate" else "")
+                        prompt = question_prompt(q)
                         t0 = time.time()
                         res = daemon.query_tier2_qwen(prepared, prompt, max_tokens=150, endpoints=[urls[backend]])
                         latency = time.time() - t0
@@ -121,11 +127,12 @@ def main() -> int:
     ap.add_argument("--backends", default="dell,satellite,gpu")
     ap.add_argument("--px", default="512,768,1024")
     ap.add_argument("--limit", type=int, default=None, help="only the first N cases")
+    ap.add_argument("--only", default=None, help="only cases whose id contains this text (e.g. text-)")
     ap.add_argument("--out", type=Path, default=None, help="results JSONL (default: next to the cases file)")
     args = ap.parse_args()
     out = args.out or args.cases.parent / f"results-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     rows = run(args.cases, [b.strip() for b in args.backends.split(",") if b.strip()],
-               [int(p) for p in args.px.split(",")], args.limit, out)
+               [int(p) for p in args.px.split(",")], args.limit, out, args.only)
     print_summary(rows)
     print(f"\nresults: {out}")
     return 0

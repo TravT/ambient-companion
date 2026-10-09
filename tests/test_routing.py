@@ -355,3 +355,24 @@ class TestCycleRouting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPromptFor(unittest.TestCase):
+    def test_locate_asks_for_a_pixel_box(self):
+        p = daemon.prompt_for("locate", "Where is the button?")
+        self.assertTrue(p.startswith("Where is the button?"))
+        self.assertIn("[x1, y1, x2, y2]", p)
+
+    def test_reading_is_sent_as_asked(self):
+        # No wording fixed the Portuguese-to-English drift (see prompt_for); only the image size did.
+        self.assertEqual(daemon.prompt_for("ocr", "Leia todo o texto da imagem."), "Leia todo o texto da imagem.")
+
+    def test_other_kinds_are_sent_unchanged(self):
+        for kind in ("describe", "presence", "ocr"):
+            self.assertEqual(daemon.prompt_for(kind, "What is this?"), "What is this?")
+
+    def test_the_eval_harness_uses_the_same_wrapper(self):
+        from eval import run_eval
+        self.assertIs(run_eval.build_prompt, daemon.prompt_for) if hasattr(run_eval, "build_prompt") else None
+        self.assertEqual(run_eval.question_prompt({"q": "Read it", "kind": "read"}), "Read it")
+        self.assertEqual(run_eval.question_prompt({"q": "Where?", "kind": "locate"}), daemon.prompt_for("locate", "Where?"))

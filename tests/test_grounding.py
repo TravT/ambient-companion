@@ -209,7 +209,10 @@ class TestGroundingPrompt(unittest.TestCase):
         self.assertIn("[x1, y1, x2, y2]", p)
         self.assertIn("pixel", p.lower())
 
-    def test_other_questions_are_sent_unchanged(self):
+    def test_descriptions_are_sent_unchanged(self):
+        self.assertEqual(self.prompt_sent("What is on the table?"), "What is on the table?")
+
+    def test_reading_questions_are_sent_as_asked(self):
         self.assertEqual(self.prompt_sent("Read the dosage on the label"), "Read the dosage on the label")
 
 

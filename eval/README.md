@@ -52,3 +52,9 @@ Plus 3-4 fresh frames from the S20 camera, since that is what the live path sees
 faces, documents, IDs or financial information. For each photo one line of what is true (for example "3 cups,
 one red; label says dosage 500 mg") is enough; the questions can be drafted from it. If the photos are viewed by
 an assistant that runs in the cloud, they leave the machine; the harness itself only talks to your own servers.
+
+## Findings so far (synthetic set, satellite, 2026-10-09)
+
+* 49 of 54 questions fully correct. Locating: click error 0-6 px at 512, 768 and 1024 px. Counting, colors and presence: correct (the one "wrong" yes/no was a badly drawn plate in the synthetic image).
+* Reading (6 text images, English and Portuguese, 14/24/48 px fonts): 94% at 512 px, 89% at 768 px, 100% at 1024 px. At 768 px a Portuguese request was half translated into English; at 512 px small print was misread ("Dipiramina" for "Dipirona").
+* **Prompt wording did not help**: plain, English "transcribe exactly, do not translate", Portuguese equivalent and "OCR:" phrasings all gave the same output. Image size is the lever. 1024 px costs about 1.8x the time of 768 px (satellite 51 s against 29 s cold), so the reading budget (`AMBIENT_READ_PX`, 768 by default) is a trade-off to settle with real photos.

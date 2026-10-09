@@ -344,6 +344,18 @@ def tier2_endpoints() -> List[str]:
     return urls
 
 
+LOCATE_SUFFIX = " Return ONLY the bounding box as [x1, y1, x2, y2] in pixel coordinates."
+
+
+def prompt_for(kind: str, query: str) -> str:
+    """The text sent to Tier 2. Only locate questions get an instruction (the box format). Reading questions are
+    sent as asked: measured 2026-10-09, no wording (plain, English or Portuguese "transcribe exactly, do not
+    translate", OCR phrasing) changed what the model read at a given image size, only the size did."""
+    if kind == "locate":
+        return query + LOCATE_SUFFIX
+    return query
+
+
 def plan_route(query: str, crop_bbox: Optional[List[int]] = None, reuse_last: bool = False) -> dict:
     """Pick the backend and the Tier 2 image budget for this question."""
     kind = classify_query(query)
@@ -856,7 +868,7 @@ def execute_ambient_cycle(
 
         print(f"   🏠 Querying Tier 2 llama-server ({plan['tier2_px']}px, backend {plan['tier2_backend']})...")
         t_phase = time.time()
-        t2_res = query_tier2_qwen(tier2_img_local, query, max_tokens=150)
+        t2_res = query_tier2_qwen(tier2_img_local, prompt_for(plan["kind"], query), max_tokens=150)
         phase["tier2"] = round(time.time() - t_phase, 2)
         if cue_timer is not None:
             cue_timer.cancel()
