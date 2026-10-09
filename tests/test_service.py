@@ -87,6 +87,37 @@ class TestDispatch(unittest.TestCase):
         self.assertNotIn("isError", resp["result"])
 
 
+class TestSpeakAndStatusWording(unittest.TestCase):
+    def speak_lang(self, text, arguments):
+        seen = {}
+
+        def fake_speak(t, lang):
+            seen["lang"] = lang
+            return {"status": "success", "played": True, "duration_sec": 0.1}
+
+        with mock.patch.object(daemon, "speak", fake_speak):
+            server._run_tool("ambient_speak", dict(arguments, text=text))
+        return seen["lang"]
+
+    def test_empty_language_is_auto_detected_not_portuguese_by_accident(self):
+        self.assertEqual(self.speak_lang("The desk looks tidy.", {"language": ""}), "en")
+        self.assertEqual(self.speak_lang("O que tem na mesa?", {"language": ""}), "pt")
+        self.assertEqual(self.speak_lang("Hello", {}), "en")
+
+    def test_explicit_language_still_wins(self):
+        self.assertEqual(self.speak_lang("Hello", {"language": "pt"}), "pt")
+
+    def test_status_does_not_call_a_busy_desktop_asleep(self):
+        report = {"adb": True, "edge_temp_c": 30.0, "battery_level": "80%", "thermal_breaker": False,
+                  "llama_server": True, "gpu_node": False, "gpu_url": None, "tts_available": True,
+                  "backends": {"gpu": False, "satellite": False, "homelab": True}}
+        with mock.patch.object(server, "readiness", return_value=report):
+            res = server._run_tool("ambient_hardware_status", {})
+        text = res["content"][0]["text"]
+        self.assertNotIn("asleep (never woken", text.split("RTX 5070")[1].splitlines()[0])
+        self.assertIn("not serving", text)
+
+
 class TestReadiness(unittest.TestCase):
     def test_unreachable_edge_is_reported_not_raised(self):
         with mock.patch.object(daemon, "get_edge_temperature", return_value=None), \

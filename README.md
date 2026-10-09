@@ -61,7 +61,8 @@ The companion supports multiple visual capture adapters via `optical_ingestion.p
 ```
 dev/ambient-companion/
 ├── daemon.py                  # Core 2P-VEP escalation daemon (CLI + library)
-├── server.py                  # MCP v2.1 tools: stdio by default, `serve` = HTTP service
+├── server.py                  # MCP tools: `serve` = the HTTP service (production); no args = stdio dev mode
+├── mcp_proxy.py               # stdio -> service proxy that Antigravity / Claude Code register
 ├── http_service.py            # HTTP front-end: /health, /ready, POST /mcp (bearer token)
 ├── optical_ingestion.py       # Pluggable multi-source optical acquisition engine
 ├── config.py                  # Environment-driven settings (no host paths in code)
@@ -107,19 +108,27 @@ Inside Termux on the S20 FE, run (re-runnable; models are verified against Huggi
 bash setup_edge_s20.sh
 ```
 
-### Step C: Register the MCP server
-**Local agent on the Dell (stdio, no network):** add to `~/.gemini/config/mcp_config.json`:
+### Step C: Register the MCP server (one companion for the whole lab)
+There is **one** companion: the Nomad service on the Dell (`ambient.home.arpa`). It decides whether to escalate to the RTX 5070 desktop or the satellite (when awake) or to answer with the Dell's own 3B, and it owns the camera lock, the voice and the state. Clients never start their own copy:
+
+* **stdio clients (Antigravity, Claude Code)** register `mcp_proxy.py`, which forwards each JSON-RPC line to the service and reads the bearer token from the vault at start (nothing secret in the config):
 ```json
 {
   "mcpServers": {
     "ambient-companion": {
       "command": "/home/tlima/Enterprise_Hub/.venv/bin/python3",
-      "args": ["/home/tlima/Enterprise_Hub/dev/ambient-companion/server.py"]
+      "args": ["/home/tlima/Enterprise_Hub/dev/ambient-companion/mcp_proxy.py"]
     }
   }
 }
 ```
-**Remote clients (HTTP):** `POST http://ambient.home.arpa/mcp` with `Authorization: Bearer $AMBIENT_API_TOKEN` and one JSON-RPC 2.0 request per call (`tools/list`, `tools/call`, ...). `GET /` is a service index, `GET /health` is liveness only, and `GET /ready` reports ADB, edge temperature, battery, llama-server and voice availability.
+  Claude Code: `claude mcp add -s user ambient-companion -- /home/tlima/Enterprise_Hub/.venv/bin/python3 /home/tlima/Enterprise_Hub/dev/ambient-companion/mcp_proxy.py`. On another machine set `AMBIENT_MCP_URL=http://ambient.home.arpa/mcp` and `AMBIENT_API_TOKEN`.
+* **HTTP clients** call `POST http://ambient.home.arpa/mcp` with `Authorization: Bearer $AMBIENT_API_TOKEN` (one JSON-RPC 2.0 request per call). Open WebUI goes through `scripts/homelab_mcp_server.py`, whose ambient tools forward to the same service.
+* `python3 server.py` (stdio, no arguments) is a **development mode only**: it starts a private copy whose camera lock is not shared with the service. Do not register it in a client.
+
+`desktop-vlm-lens` (PRJ-13) is a different thing: a standalone stdio server for one machine (the office laptop), with no homelab addresses in its defaults.
+
+---
 
 ### Step D: Windows client
 Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arpa/health`). Set `AMBIENT_API_TOKEN` in your user environment.

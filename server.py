@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.5.0"
+SERVER_VERSION = "2.5.1"
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -364,7 +364,7 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
         elif tool_name == "ambient_speak":
             text = arguments.get("text", "")
-            lang = arguments.get("language", "en")
+            lang = arguments.get("language") or daemon.detect_language(text)
 
             speech = daemon.speak(text, lang)
             if speech.get("status") == "success":
@@ -394,7 +394,7 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 f"- ADB Gateway: {'CONNECTED' if r['adb'] else 'UNREACHABLE'} "
                 f"({daemon.CONTAINER_IP} -> {daemon.DEVICE_TARGET})\n"
                 f"- Homelab llama-server: {'HEALTHY (200 OK)' if r['llama_server'] else 'UNHEALTHY / OFFLINE'}\n"
-                f"- RTX 5070 desktop: {'AWAKE (used first for Tier 2)' if r['backends']['gpu'] else 'asleep (never woken by the companion)'}\n"
+                f"- RTX 5070 desktop: {'AWAKE and serving the VLM (used first for Tier 2)' if r['backends']['gpu'] else 'not serving the VLM now (asleep, in Windows, or running Strata; never woken or switched by the companion)'}\n"
                 f"- MateBook satellite: {'AWAKE (used before the Dell for Tier 2)' if r['backends']['satellite'] else 'asleep or offline (never woken by the companion)'}\n"
                 f"- Voice (pocket-tts, mode {config.TTS_MODE}): {'available' if r['tts_available'] else 'unavailable (not installed on the S20, or disabled)'}"
             )
