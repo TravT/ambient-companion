@@ -61,6 +61,11 @@ fetch_verified "mmproj-SmolVLM-256M-Instruct-Q8_0.gguf"
 # 4. PulseAudio AAudio sink (only restart it when the sink is missing)
 echo "[4/5] Configuring PulseAudio AAudio sink..."
 if ! pactl info >/dev/null 2>&1; then
+    # A running-but-hung daemon ("Daemon already running", clients get "Connection refused") ignores
+    # `pulseaudio --start`: hard kill it and remove the stale pid file first. The companion does the same on demand.
+    pkill -9 pulseaudio 2>/dev/null || true
+    sleep 1
+    find "${PREFIX}/tmp" -maxdepth 2 -path '*/pulse-*/pid' -delete 2>/dev/null || true
     pulseaudio --start --exit-idle-time=-1 --load="module-aaudio-sink" 2>/dev/null || true
 fi
 pactl info | grep -E "Server Name|Default Sink" || echo "PulseAudio running."

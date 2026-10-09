@@ -43,6 +43,7 @@ import base64
 import re
 import shlex
 import threading
+import queue
 import argparse
 import subprocess
 import requests
@@ -343,7 +344,7 @@ def tier2_endpoints() -> List[str]:
     return urls
 
 
-def plan_route(query: str, crop_bbox: Optional[List[int]] = None) -> dict:
+def plan_route(query: str, crop_bbox: Optional[List[int]] = None, reuse_last: bool = False) -> dict:
     """Pick the backend and the Tier 2 image budget for this question."""
     kind = classify_query(query)
     best = best_backend()
@@ -356,6 +357,8 @@ def plan_route(query: str, crop_bbox: Optional[List[int]] = None) -> dict:
     if kind == "locate":
         return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": config.GROUND_PX}
     if kind == "describe":
+        return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": config.SCENE_PX}
+    if reuse_last:    # a follow-up on a frame the Tier 2 server already has cached beats a fresh pass on the phone
         return {"kind": kind, "backend": best, "tier2_backend": best, "tier2_px": config.SCENE_PX}
     return {"kind": kind, "backend": "edge", "tier2_backend": best, "tier2_px": config.SCENE_PX}
 
@@ -374,9 +377,11 @@ def query_tier2_qwen(image_path: Path, prompt: str, max_tokens: int = 150) -> di
         "messages": [
             {
                 "role": "user",
+                # Image BEFORE the text: llama-server reuses its cached image tokens only when the request
+                # starts the same way, so a different question about the same frame then costs ~1 s, not ~14 s.
                 "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                    {"type": "text", "text": prompt}
                 ]
             }
         ],
@@ -472,15 +477,52 @@ def play_audio_on_edge(wav_path: Path) -> bool:
     """Pushes audio payload to S20 FE and plays it aloud via PulseAudio AAudio sink."""
     remote_wav = f"/sdcard/Download/{safe_remote_name(wav_path.name)}"
     subprocess.run(adb_args("push", str(wav_path), remote_wav), capture_output=True, check=False)
-
-    # Ensure media volume is at 30%
     subprocess.run(adb_args("shell", "cmd media_session volume --stream 3 --set 5"),
                    capture_output=True, check=False)
+    if not ensure_edge_audio():
+        return False
+    ok, _ = _play_wav_on_edge(remote_wav)
+    return ok
 
-    # Play via paplay with dynamic timeout
-    play_cmd = f"timeout 10 paplay {shlex.quote(remote_wav)}"
-    out, dur = run_edge_command(play_cmd, timeout=12)
-    return "TIMEOUT" not in out and "ERROR" not in out
+
+PHONE_PREFIX = "/data/data/com.termux/files/usr"
+_audio_ok_until = 0.0
+
+
+def edge_audio_ok() -> bool:
+    """True when PulseAudio on the phone accepts connections (read-only check)."""
+    out, _ = run_edge_command("pactl info >/dev/null 2>&1 && echo AUDIO_OK || echo AUDIO_DOWN", timeout=10)
+    return out.strip().endswith("AUDIO_OK")
+
+
+def ensure_edge_audio(force: bool = False) -> bool:
+    """Make sure the phone can play sound; restart a hung PulseAudio (alive but refusing connections).
+
+    A plain `pulseaudio --start` does nothing when the old daemon is hung ("Daemon already running"),
+    so recovery is: hard kill, remove the stale pid file, start with the AAudio sink. Cached for 60 s.
+    """
+    global _audio_ok_until
+    if not force and time.time() < _audio_ok_until:
+        return True
+    check = "pactl info >/dev/null 2>&1"
+    recover = (
+        "pkill -9 pulseaudio; sleep 1; "
+        f"find {PHONE_PREFIX}/tmp -maxdepth 2 -path '*/pulse-*/pid' -delete; "
+        "pulseaudio --start --exit-idle-time=-1 --load=module-aaudio-sink; sleep 2"
+    )
+    out, _ = run_edge_command(f"{check} || {{ {recover}; }}; {check} && echo AUDIO_OK || echo AUDIO_DOWN", timeout=45)
+    ok = out.strip().endswith("AUDIO_OK")
+    _audio_ok_until = time.time() + 60 if ok else 0.0
+    return ok
+
+
+def _play_wav_on_edge(remote_wav: str) -> Tuple[bool, str]:
+    """Play with paplay and judge by its EXIT CODE (stdout text is not evidence of sound)."""
+    out, _ = run_edge_command(f"timeout 20 paplay {shlex.quote(remote_wav)} 2>&1; echo RC=$?", timeout=25)
+    lines = out.strip().splitlines()
+    ok = bool(lines) and lines[-1].strip() == "RC=0"
+    detail = "\n".join(l for l in lines if not l.startswith("RC=")).strip()
+    return ok, detail
 
 
 def tts_available() -> bool:
@@ -547,13 +589,95 @@ def speak_on_edge(text: str, language: str) -> dict:
         where = "s20"
     synth_dur = time.time() - t0
 
+    if not ensure_edge_audio():
+        run_edge_command(f"rm -f {shlex.quote(remote_wav)}", timeout=10)
+        return {"status": "error", "played": False, "language": language, "duration_sec": round(synth_dur, 2),
+                "where": where, "error": "phone audio (PulseAudio) is down and could not be restarted"}
     subprocess.run(adb_args("shell", "cmd media_session volume --stream 3 --set 5"),
                    capture_output=True, check=False)
-    play_out, _ = run_edge_command(f"timeout 15 paplay {shlex.quote(remote_wav)}", timeout=20)
-    played = "TIMEOUT" not in play_out and "ERROR" not in play_out
+    played, detail = _play_wav_on_edge(remote_wav)
     run_edge_command(f"rm -f {shlex.quote(remote_wav)}", timeout=10)
-    return {"status": "success", "played": played, "language": language,
-            "duration_sec": round(synth_dur, 2), "where": where}
+    result = {"status": "success" if played else "error", "played": played, "language": language,
+              "duration_sec": round(synth_dur, 2), "where": where}
+    if not played:
+        result["error"] = detail or "paplay failed on the phone"
+    return result
+
+
+def split_for_speech(text: str, first_max: int = 9, rest_max: int = 11) -> List[str]:
+    """Short first chunk (audio starts early), then clause-sized chunks; every word is kept in order."""
+    chunks: List[str] = []
+    cur: List[str] = []
+    limit = first_max
+    for w in text.split():
+        cur.append(w)
+        if (w.endswith((",", ".", "!", "?", ";", ":")) and len(cur) >= 4) or len(cur) >= limit:
+            chunks.append(" ".join(cur))
+            cur, limit = [], rest_max
+    if cur:
+        if chunks and len(cur) < 3:
+            chunks[-1] += " " + " ".join(cur)
+        else:
+            chunks.append(" ".join(cur))
+    return chunks
+
+
+def speak_on_edge_chunked(text: str, language: str) -> dict:
+    """Synthesize chunk N+1 on the phone while chunk N is playing, so audio starts after the first chunk only."""
+    t0 = time.time()
+    if not ensure_edge_tts_server():
+        return speak_on_edge(text, language)
+    chunks = split_for_speech(text)
+    stamp = int(time.time() * 1000)
+    ready: "queue.Queue" = queue.Queue()
+
+    def producer() -> None:
+        for i, chunk in enumerate(chunks):
+            wav = f"{EDGE_TERMUX_HOME}/tts_{stamp}_{i}.wav"
+            out, _ = run_edge_command(_warm_synth_command(chunk, language, wav), timeout=90)
+            ok = "SYNTH_OK" in out
+            ready.put((wav, ok))
+            if not ok:
+                break
+        ready.put(None)
+
+    worker = threading.Thread(target=producer, daemon=True)
+    worker.start()
+    first_audio = None
+    played_any = False
+    audio_error = ""
+    while True:
+        item = ready.get()
+        if item is None:
+            break
+        wav, ok = item
+        if not ok:
+            break
+        if first_audio is None:
+            if not ensure_edge_audio():
+                audio_error = "phone audio (PulseAudio) is down and could not be restarted"
+                run_edge_command(f"rm -f {shlex.quote(wav)}", timeout=10)
+                break
+            first_audio = time.time() - t0
+            subprocess.run(adb_args("shell", "cmd media_session volume --stream 3 --set 5"),
+                           capture_output=True, check=False)
+        ok, detail = _play_wav_on_edge(wav)
+        played_any = played_any or ok
+        if not ok and not audio_error:
+            audio_error = detail or "paplay failed on the phone"
+        run_edge_command(f"rm -f {shlex.quote(wav)}", timeout=10)
+    worker.join(timeout=60)
+    if audio_error and first_audio is None:
+        return {"status": "error", "played": False, "language": language, "error": audio_error,
+                "duration_sec": round(time.time() - t0, 2), "where": "s20-warm-chunked"}
+    if first_audio is None:                 # the first chunk never synthesized: use the single-shot path
+        return speak_on_edge(text, language)
+    result = {"status": "success" if played_any else "error", "played": played_any, "language": language,
+              "duration_sec": round(time.time() - t0, 2), "first_audio_sec": round(first_audio, 2),
+              "where": "s20-warm-chunked"}
+    if not played_any:
+        result["error"] = audio_error or "paplay failed on the phone"
+    return result
 
 
 def speak(text: str, language: str) -> dict:
@@ -566,7 +690,37 @@ def speak(text: str, language: str) -> dict:
         res = synthesize_speech(text, language, wav)
         res["played"] = bool(res.get("status") == "success" and play_audio_on_edge(wav))
         return res
+    if config.TTS_WARM and len(text.split()) > 9:
+        return speak_on_edge_chunked(text, language)
     return speak_on_edge(text, language)
+
+
+_last_frame: Optional[Tuple[Path, float]] = None
+_last_frame_source: Optional[str] = None
+
+
+def acquire_frame(source: str, reuse_last: bool = False) -> Path:
+    """Capture a frame, or (opt-in) re-use the previous one from the same source for a follow-up question."""
+    global _last_frame, _last_frame_source
+    if (reuse_last and _last_frame is not None and _last_frame_source == source
+            and time.time() - _last_frame[1] <= config.LAST_FRAME_TTL_SEC and _last_frame[0].exists()):
+        return _last_frame[0]
+    path = optical_ingestion.acquire_image(source)
+    _last_frame, _last_frame_source = (path, time.time()), source
+    return path
+
+
+def speech_excerpt(text: str, max_words: int = 28) -> str:
+    """What to say aloud: the first sentence (two if it is very short), cut at max_words. Plain text, no markdown."""
+    clean = re.sub(r"[\*#_`]", "", text or "").strip()
+    if not clean:
+        return ""
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", clean) if s]
+    out = sentences[0]
+    if len(out.split()) < 4 and len(sentences) > 1:
+        out = f"{out} {sentences[1]}"
+    words = out.split()
+    return " ".join(words[:max_words]) if len(words) > max_words else out
 
 
 def execute_ambient_cycle(
@@ -574,7 +728,8 @@ def execute_ambient_cycle(
     source: str = "camera",
     lang: str = None,
     play_audio: bool = True,
-    crop_bbox: Optional[List[int]] = None
+    crop_bbox: Optional[List[int]] = None,
+    reuse_last_frame: bool = False
 ) -> dict:
     """
     Executes an end-to-end ambient companion cycle:
@@ -610,13 +765,13 @@ def execute_ambient_cycle(
         print(f"🚨 THERMAL CIRCUIT BREAKER: Edge temperature {temp_c:.1f}°C exceeds threshold! Aborting.")
         return {"status": "aborted_thermal", "temp_c": temp_c}
 
-    plan = plan_route(query, crop_bbox)
+    plan = plan_route(query, crop_bbox, reuse_last=reuse_last_frame)
     print(f"• Route      : {plan['kind']} -> {plan['backend']} (Tier 2 image {plan['tier2_px']}px)")
 
     # Step 1: Optical Acquisition
     print(f"\n📷 [Optical Ingestion] Acquiring frame from source: '{source}'...")
     t0_opt = time.time()
-    raw_img = optical_ingestion.acquire_image(source)
+    raw_img = acquire_frame(source, reuse_last_frame)
     opt_dur = round(time.time() - t0_opt, 2)
     print(f"   ✓ Acquired: {raw_img.name} ({opt_dur}s)")
 
@@ -706,9 +861,7 @@ def execute_ambient_cycle(
     
     # Step 3: Pocket-TTS Audio Synthesis
     if play_audio and final_answer:
-        clean_speech = re.sub(r"[\*#_`]", "", final_answer).strip()
-        sentences = re.split(r"(?<=[.!?])\s+", clean_speech)
-        speech_text = " ".join(sentences[:2]) if len(sentences) > 2 else clean_speech
+        speech_text = speech_excerpt(final_answer, config.SPEAK_MAX_WORDS)
         
         print(f"\n🎵 [Voice] Speaking via Pocket-TTS ({lang.upper()}, mode={config.TTS_MODE})...")
         print(f"   Speech Prompt: \"{speech_text}\"")

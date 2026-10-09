@@ -149,6 +149,7 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | `FALLBACK_LLAMA_SERVER_URLS` | Omarchy `http://100.102.231.37:8085/...`, then Windows `http://100.77.169.15:8085/...` | The RTX 5070 desktop is one dual-boot rig with two tailnet identities; the first URL whose `/health` answers is used (only one OS side is online at a time). A single `FALLBACK_LLAMA_SERVER_URL` still works |
 | `AMBIENT_PREFER_GPU` / `AMBIENT_GPU_PROBE_TTL` | `1` / `15` | Use the RTX 5070 desktop first when its `/health` answers (probed, never woken); probe cache in seconds |
 | `AMBIENT_SCENE_PX` / `AMBIENT_READ_PX` / `AMBIENT_GROUND_PX` | `512` / `768` / `1024` | Longest side sent to Tier 2 for scenes, for reading and for locate questions (crops go up to 1024; the GPU always gets 1024). Locate needs 1024: click error was 7-60 px at 512, 10-173 px at 768 and 0-6 px at 1024 |
+| `AMBIENT_LAST_FRAME_TTL` / `AMBIENT_SPEAK_MAX_WORDS` | `60` / `28` | How long `reuse_last_frame` may re-use the previous frame, and how many words of an answer are spoken (the full answer is always returned as text) |
 | `AMBIENT_RETENTION_DAYS` | `7` | Age after which cached frames/WAVs are deleted |
 | `AMBIENT_TTS_MODE` | `edge` | `edge`: pocket-tts runs on the S20 FE (Termux) and plays via `paplay`; `host`: synthesize locally with `POCKET_TTS_BIN` and push the WAV (dev CLI); `off`: never speak |
 | `EDGE_TTS_BIN` / `EDGE_VOICE_EN` / `EDGE_VOICE_PT` | `pocket-tts` / `~/voices/voice_profile_user_optionB_full25s.safetensors` / `rafael` | Voice backend and profiles inside Termux |
@@ -192,6 +193,11 @@ When reading fine text (medication labels, credit card digits, IC chips), downsa
 
 
 ---
+
+### Follow-ups and speech (v1.6.0)
+* **Follow-ups on the same scene:** the Tier 2 request puts the image before the text, so llama-server keeps the image tokens when only the question changes. Pass `reuse_last_frame: true` (cycle, triage and grounding tools) to skip the capture too. Measured on the satellite: different questions on one frame 13-15 s with the text first, 0.6-2 s with the image first; end to end a follow-up took 1.1 s. A yes/no follow-up skips the phone's SmolVLM and goes to Tier 2, where the image is cached.
+* **Speech:** the first sentence (or about 28 words) is spoken, in chunks that are synthesized while the previous chunk plays, so audio starts after about 4 s instead of ~10 s.
+* **Playback is judged by `paplay`'s exit code**, and the companion restarts a hung PulseAudio on the phone (alive but refusing connections: hard kill, remove the stale pid file, start the AAudio sink) before speaking. `/ready` reports `audio`.
 
 ### Grounding coordinate format (fixed in v1.4.1)
 

@@ -135,6 +135,11 @@ class TestTts(unittest.TestCase):
 class TestEdgeSpeech(unittest.TestCase):
     """Voice runs on the S20 FE: pocket-tts generate in Termux, then paplay."""
 
+    def setUp(self):
+        patcher = mock.patch.object(daemon, "ensure_edge_audio", return_value=True)   # audio recovery has its own tests
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _edge(self, outputs):
         calls = []
 
@@ -145,7 +150,7 @@ class TestEdgeSpeech(unittest.TestCase):
         return calls, fake_edge
 
     def test_edge_mode_synthesizes_then_plays(self):
-        calls, fake = self._edge(["SYNTH_OK", "", ""])
+        calls, fake = self._edge(["SYNTH_OK", "RC=0", ""])
         with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", False), \
                 mock.patch.object(daemon, "run_edge_command", fake), \
                 mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
@@ -159,7 +164,7 @@ class TestEdgeSpeech(unittest.TestCase):
         self.assertTrue(argv[argv.index("--voice") + 1].endswith(".safetensors"))
 
     def test_edge_pt_uses_builtin_voice(self):
-        calls, fake = self._edge(["SYNTH_OK", "", ""])
+        calls, fake = self._edge(["SYNTH_OK", "RC=0", ""])
         with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", False), \
                 mock.patch.object(daemon, "run_edge_command", fake), \
                 mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
@@ -178,7 +183,7 @@ class TestEdgeSpeech(unittest.TestCase):
 
     def test_warm_server_path_posts_text_literally(self):
         # SERVER_UP, then the curl synthesis, then playback, then cleanup.
-        calls, fake = self._edge(["UP", "SYNTH_OK", "", ""])
+        calls, fake = self._edge(["UP", "SYNTH_OK", "RC=0", ""])
         nasty = "@/etc/passwd <x> $(id) 'q'"
         with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", True), \
                 mock.patch.object(daemon, "run_edge_command", fake), \
@@ -195,7 +200,7 @@ class TestEdgeSpeech(unittest.TestCase):
         self.assertIn("paplay", calls[2])
 
     def test_warm_server_pt_selects_builtin_voice_per_request(self):
-        calls, fake = self._edge(["UP", "SYNTH_OK", "", ""])
+        calls, fake = self._edge(["UP", "SYNTH_OK", "RC=0", ""])
         with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", True), \
                 mock.patch.object(daemon, "run_edge_command", fake), \
                 mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
@@ -204,7 +209,7 @@ class TestEdgeSpeech(unittest.TestCase):
 
     def test_warm_failure_falls_back_to_cli(self):
         # server never comes up -> per-call CLI still speaks
-        calls, fake = self._edge(["DOWN", "SYNTH_OK", "", ""])
+        calls, fake = self._edge(["DOWN", "SYNTH_OK", "RC=0", ""])
         with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", True), \
                 mock.patch.object(daemon, "run_edge_command", fake), \
                 mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
@@ -229,6 +234,68 @@ class TestEdgeSpeech(unittest.TestCase):
             self.assertFalse(daemon.tts_available())
         with mock.patch.object(config, "TTS_MODE", "off"):
             self.assertFalse(daemon.tts_available())
+
+
+class TestPhoneAudio(unittest.TestCase):
+    def setUp(self):
+        daemon._audio_ok_until = 0.0
+
+    def test_audio_check_passes_without_touching_pulseaudio(self):
+        seen = []
+
+        def fake(cmd, timeout=45, as_root=False):
+            seen.append(cmd)
+            return "AUDIO_OK", 0.1
+
+        with mock.patch.object(daemon, "run_edge_command", fake):
+            self.assertTrue(daemon.ensure_edge_audio())
+            self.assertTrue(daemon.ensure_edge_audio())            # cached for a while
+        self.assertEqual(len(seen), 1)
+        self.assertIn("pactl info", seen[0])
+
+    def test_a_hung_pulseaudio_gets_a_hard_restart_command(self):
+        seen = []
+
+        def fake(cmd, timeout=45, as_root=False):
+            seen.append(cmd)
+            return "AUDIO_OK", 0.1
+
+        with mock.patch.object(daemon, "run_edge_command", fake):
+            daemon.ensure_edge_audio(force=True)
+        cmd = seen[0]
+        self.assertIn("pkill -9 pulseaudio", cmd)
+        self.assertIn("module-aaudio-sink", cmd)
+        self.assertIn("-path '*/pulse-*/pid' -delete", cmd)         # stale pid file removed by exact pattern
+
+    def test_audio_down_after_recovery_is_reported(self):
+        with mock.patch.object(daemon, "run_edge_command", return_value=("AUDIO_DOWN", 0.1)):
+            self.assertFalse(daemon.ensure_edge_audio(force=True))
+
+    def test_playback_failure_is_reported_not_claimed_as_played(self):
+        outputs = ["SYNTH_OK", "Connection failure: Connection refused\nRC=1", ""]
+        calls = []
+
+        def fake(cmd, timeout=45, as_root=False):
+            calls.append(cmd)
+            return outputs.pop(0), 0.1
+
+        with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", False), \
+                mock.patch.object(daemon, "ensure_edge_audio", return_value=True), \
+                mock.patch.object(daemon, "run_edge_command", fake), \
+                mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            res = daemon.speak("hello there", "en")
+        self.assertFalse(res["played"])
+        self.assertEqual(res["status"], "error")
+        self.assertIn("Connection refused", res["error"])
+
+    def test_no_playback_attempt_when_audio_cannot_be_recovered(self):
+        with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(config, "TTS_WARM", False), \
+                mock.patch.object(daemon, "ensure_edge_audio", return_value=False), \
+                mock.patch.object(daemon, "run_edge_command", return_value=("SYNTH_OK", 0.1)) as run:
+            res = daemon.speak("hello there", "en")
+        self.assertFalse(res["played"])
+        self.assertIn("audio", res["error"].lower())
+        self.assertFalse(any("paplay" in c.args[0] for c in run.call_args_list))
 
 
 class TestAllowedDirs(unittest.TestCase):

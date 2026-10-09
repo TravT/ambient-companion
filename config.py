@@ -105,6 +105,12 @@ API_TOKEN = os.getenv("AMBIENT_API_TOKEN", "")
 # Seconds a tool call waits for the camera/ADB before answering "busy".
 HARDWARE_LOCK_TIMEOUT_SEC = float(os.getenv("AMBIENT_LOCK_TIMEOUT", "240"))
 
+# --- Follow-ups and spoken answers ---
+# A follow-up on the same frame can skip the capture and re-use the Tier 2 server's image cache.
+LAST_FRAME_TTL_SEC = float(os.getenv("AMBIENT_LAST_FRAME_TTL", "60"))
+# Spoken answers: the first sentence, cut at this many words (the full answer is still returned as text).
+SPEAK_MAX_WORDS = int(os.getenv("AMBIENT_SPEAK_MAX_WORDS", "28"))
+
 # --- Safety and housekeeping ---
 RETENTION_DAYS = float(os.getenv("AMBIENT_RETENTION_DAYS", "7"))
 

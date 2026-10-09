@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.5.1"
+SERVER_VERSION = "2.6.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -81,6 +81,7 @@ def readiness() -> dict:
         "backends": backends,
         "gpu_url": daemon.active_gpu_url(),
         "tts_available": daemon.tts_available(),
+        "audio": daemon.edge_audio_ok(),
     }
 
 
@@ -98,6 +99,11 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
+                "reuse_last_frame": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Follow-up on the same scene: skip the capture and re-use the previous frame (up to 60 s old, same source). Different questions about the same frame then answer in 1-2 s."
+                },
                 "query": {
                     "type": "string",
                     "description": "Visual question or instruction (e.g. 'Is there medicine on the desk?', 'Read the dosage on the bottle')."
@@ -142,6 +148,11 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
+                "reuse_last_frame": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Follow-up on the same scene: skip the capture and re-use the previous frame (up to 60 s old, same source). Different questions about the same frame then answer in 1-2 s."
+                },
                 "query": {
                     "type": "string",
                     "description": "Macroscopic visual question (e.g. 'Is the desk empty?', 'Do you see a water glass?')."
@@ -165,6 +176,11 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
+                "reuse_last_frame": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Follow-up on the same scene: skip the capture and re-use the previous frame (up to 60 s old, same source). Different questions about the same frame then answer in 1-2 s."
+                },
                 "query": {
                     "type": "string",
                     "description": "Fine-text reading or grounding prompt (e.g. 'Read the text on the yellow label', 'Locate the keyboard with bounding boxes')."
@@ -245,7 +261,8 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 source=source,
                 lang=lang_param,
                 play_audio=play_audio,
-                crop_bbox=crop_param
+                crop_bbox=crop_param,
+                reuse_last_frame=bool(arguments.get("reuse_last_frame", False))
             )
             return {
                 "content": [
@@ -261,7 +278,7 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             source = arguments.get("source") or arguments.get("image_path", "camera")
             crop_param = arguments.get("crop_bbox") or arguments.get("roi_crop")
             
-            raw_img = optical_ingestion.acquire_image(source)
+            raw_img = daemon.acquire_frame(source, bool(arguments.get("reuse_last_frame", False)))
             edge_img = daemon.BENCHMARK_DIR / f"mcp_edge_384px_{raw_img.stem}.jpg"
             optical_ingestion.prepare_budgeted_image(raw_img, 384, edge_img, crop_bbox=crop_param)
             
@@ -284,8 +301,8 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             max_tokens = arguments.get("max_tokens", 150)
             crop_param = arguments.get("crop_bbox") or arguments.get("roi_crop")
             
-            raw_img = optical_ingestion.acquire_image(source)
-            budget_max_dim = daemon.plan_route(query, crop_param)["tier2_px"]
+            raw_img = daemon.acquire_frame(source, bool(arguments.get("reuse_last_frame", False)))
+            budget_max_dim = daemon.plan_route(query, crop_param, reuse_last=bool(arguments.get("reuse_last_frame", False)))["tier2_px"]
             tier2_img = daemon.BENCHMARK_DIR / f"mcp_tier2_{budget_max_dim}px_{raw_img.stem}.jpg"
             _, meta = optical_ingestion.prepare_budgeted_image(raw_img, budget_max_dim, tier2_img, crop_bbox=crop_param)
             
@@ -396,6 +413,7 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 f"- Homelab llama-server: {'HEALTHY (200 OK)' if r['llama_server'] else 'UNHEALTHY / OFFLINE'}\n"
                 f"- RTX 5070 desktop: {'AWAKE and serving the VLM (used first for Tier 2)' if r['backends']['gpu'] else 'not serving the VLM now (asleep, in Windows, or running Strata; never woken or switched by the companion)'}\n"
                 f"- MateBook satellite: {'AWAKE (used before the Dell for Tier 2)' if r['backends']['satellite'] else 'asleep or offline (never woken by the companion)'}\n"
+                f"- Phone audio (PulseAudio): {'OK' if r.get('audio') else 'DOWN (restarted automatically before the next spoken answer)'}\n"
                 f"- Voice (pocket-tts, mode {config.TTS_MODE}): {'available' if r['tts_available'] else 'unavailable (not installed on the S20, or disabled)'}"
             )
             return {
