@@ -507,8 +507,19 @@ def edge_audio_ok() -> bool:
     return out.strip().endswith("AUDIO_OK")
 
 
+# Healthy = answers, has the AAudio sink, and is NOT a default.pa daemon. Termux autospawns PulseAudio with
+# default.pa on any pactl/paplay call after a crash, and that config loads module-suspend-on-idle (the hang).
+PULSE_HEALTHY = (
+    "timeout 4 pactl info >/dev/null 2>&1 && "
+    "m=$(timeout 4 pactl list modules short 2>/dev/null) && "
+    "printf '%s' \"$m\" | grep -q module-aaudio-sink && "
+    "! printf '%s' \"$m\" | grep -q module-suspend-on-idle"
+)
+
+
 def ensure_edge_audio(force: bool = False) -> bool:
-    """Make sure the phone can play sound; restart a hung PulseAudio (alive but refusing connections).
+    """Make sure the phone can play sound; restart a hung PulseAudio (alive but refusing connections) or an
+    autospawned default.pa one (see PULSE_HEALTHY).
 
     A plain `pulseaudio --start` does nothing when the old daemon is hung ("Daemon already running"),
     so recovery is: hard kill, remove the stale pid file, start a minimal daemon (only the unix socket and the
@@ -518,7 +529,7 @@ def ensure_edge_audio(force: bool = False) -> bool:
     global _audio_ok_until
     if not force and time.time() < _audio_ok_until:
         return True
-    check = "timeout 4 pactl info >/dev/null 2>&1"      # a hung daemon answers "Timeout" after a long wait
+    check = f"{{ {PULSE_HEALTHY}; }}"                  # a hung daemon answers "Timeout" after a long wait
     recover = (
         "pkill -9 pulseaudio; sleep 1; "
         f"find {PHONE_PREFIX}/tmp -maxdepth 2 -path '*/pulse-*/pid' -delete; "

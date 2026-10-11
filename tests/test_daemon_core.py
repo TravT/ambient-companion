@@ -7,6 +7,7 @@ No hardware needed: every adb/HTTP call is mocked.
 import importlib
 import os
 import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -269,8 +270,44 @@ class TestPhoneAudio(unittest.TestCase):
         # closed after idle and the daemon hung within ~16 min; without it a 30 min monitor saw zero failures.
         self.assertIn("pulseaudio -n ", cmd)
         self.assertIn("module-native-protocol-unix", cmd)
-        self.assertNotIn("suspend-on-idle", cmd.replace("module-suspend-on-idle is never loaded", ""))
+        self.assertNotIn("--load=module-suspend-on-idle", cmd)
         self.assertIn("-path '*/pulse-*/pid' -delete", cmd)         # stale pid file removed by exact pattern
+
+    def _check_against_fake_pactl(self, modules: str, info_rc: int = 0) -> bool:
+        """Run the real health check in a local shell against a fake `pactl` that prints `modules`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "pactl"
+            fake.write_text("#!/bin/sh\n"
+                            f'[ "$1" = info ] && exit {info_rc}\n'
+                            f"[ {info_rc} = 0 ] || exit 1\n"
+                            f"printf '%s\\n' {shlex.quote(modules)}\n")
+            fake.chmod(0o755)
+            proc = subprocess.run(["bash", "-c", daemon.PULSE_HEALTHY], capture_output=True,
+                                  env={"PATH": f"{tmp}:/usr/bin:/bin"})
+            return proc.returncode == 0
+
+    def test_the_minimal_daemon_passes_the_check(self):
+        self.assertTrue(self._check_against_fake_pactl(
+            "0\tmodule-native-protocol-unix\t\t\n1\tmodule-aaudio-sink\t\t"))
+
+    def test_an_autospawned_default_daemon_fails_the_check(self):
+        # Termux autospawns PulseAudio with default.pa on any pactl/paplay call after a crash. That daemon loads
+        # module-suspend-on-idle (the hang of 2026-10-09), so the check must reject it and trigger the restart.
+        self.assertFalse(self._check_against_fake_pactl(
+            "0\tmodule-native-protocol-unix\t\t\n7\tmodule-suspend-on-idle\t\t\n9\tmodule-aaudio-sink\t\t"))
+
+    def test_a_daemon_without_the_aaudio_sink_fails_the_check(self):
+        self.assertFalse(self._check_against_fake_pactl("0\tmodule-native-protocol-unix\t\t"))
+
+    def test_a_daemon_refusing_connections_fails_the_check(self):
+        self.assertFalse(self._check_against_fake_pactl("", info_rc=1))
+
+    def test_recovery_uses_the_strict_check(self):
+        seen = []
+        with mock.patch.object(daemon, "run_edge_command",
+                               lambda cmd, timeout=45, as_root=False: (seen.append(cmd), ("AUDIO_OK", 0.1))[1]):
+            daemon.ensure_edge_audio(force=True)
+        self.assertEqual(seen[0].count(daemon.PULSE_HEALTHY), 2)    # before deciding to restart, and after
 
     def test_every_pactl_call_has_a_timeout_so_a_hung_daemon_cannot_block_the_cycle(self):
         seen = []
