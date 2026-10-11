@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.7.1"
+SERVER_VERSION = "2.7.2"
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -244,6 +244,10 @@ TOOLS = [
         }
     }
 ]
+
+for _tool in TOOLS:
+    # MCP requires `inputSchema` (Claude Code drops the whole list without it); `parameters` stays as an alias.
+    _tool["inputSchema"] = _tool["parameters"]
 
 
 def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
