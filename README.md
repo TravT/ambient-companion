@@ -168,7 +168,8 @@ WAV) and `POST /stt` (16 kHz mono WAV, returns the transcript) on `127.0.0.1:809
 Models are mounted read-only at `/models` and loaded offline (`HF_HUB_OFFLINE=1`): pocket-tts files in the hub cache
 layout under `/models/hf`, faster-whisper `small` in `/models/faster-whisper-small`. Memory on the Dell CPU: a voice
 costs about 0.95 GB RSS (measured; int8 quantization did not reduce it) and the Dell has 1.5-2.5 GB free, so nothing
-is resident: `POST /warm` loads a model in the background. The companion warms the voice when a question starts
+is resident: `POST /warm` loads a model in the background, in its own worker process (killing the worker on idle is what
+really returns the memory; dropping torch objects inside one process left ~0.9 GB held). The companion warms the voice when a question starts
 (it loads in ~7 s while the image is analysed) and Whisper while the user is still talking; models are dropped after
 `SPEECH_IDLE_UNLOAD_SEC` (600 s) idle. A short sentence takes about 2 s to synthesize, about half its playback time.
 

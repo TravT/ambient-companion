@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 LANGUAGES = {"en": "english", "pt": "portuguese"}
 MAX_TEXT_CHARS = int(os.getenv("SPEECH_MAX_TEXT_CHARS", "600"))
 MAX_AUDIO_BYTES = int(os.getenv("SPEECH_MAX_AUDIO_BYTES", str(16000 * 2 * 30 + 44)))   # 30 s of 16 kHz 16-bit mono
@@ -53,14 +53,22 @@ class LazyModel:
     def loaded(self) -> bool:
         return self.obj is not None
 
-    def use(self, fn: Callable[[Any], Any]) -> Any:
+    def _ensure(self) -> None:
+        if self.obj is None:
+            t0 = time.time()
+            self.obj = self.loader()
+            log(f"loaded {self.name} in {time.time() - t0:.1f} s")
+
+    def ensure_loaded(self) -> None:
         with self.lock:
-            if self.obj is None:
-                t0 = time.time()
-                self.obj = self.loader()
-                log(f"loaded {self.name} in {time.time() - t0:.1f} s")
+            self._ensure()
+            self.last_used = self.clock()
+
+    def call(self, *args) -> Any:
+        with self.lock:
+            self._ensure()
             try:
-                return fn(self.obj)
+                return self.obj(*args)
             finally:
                 self.last_used = self.clock()
 
@@ -75,6 +83,118 @@ class LazyModel:
             return True
         finally:
             self.lock.release()
+
+
+def _worker_main(conn, factory) -> None:
+    """Child process: build the model once, then answer calls until killed."""
+    try:
+        fn = factory()
+    except Exception as err:  # report load failures to the parent instead of dying silently
+        conn.send((False, f"load failed: {type(err).__name__}: {err}"))
+        return
+    conn.send((True, "ready"))
+    while True:
+        try:
+            args = conn.recv()
+        except EOFError:
+            return
+        try:
+            conn.send((True, fn(*args)))
+        except Exception as err:
+            conn.send((False, f"{type(err).__name__}: {err}"))
+
+
+class WorkerModel:
+    """A model hosted in a child process (spawn). Unloading kills the child, which really returns its memory:
+    dropping torch objects inside one Python process left ~0.9 GB resident on the Dell (2026-10-14)."""
+
+    def __init__(self, name: str, factory: Callable[[], Callable], resident: bool = False,
+                 idle_sec: float = IDLE_UNLOAD_SEC, clock: Callable[[], float] = time.monotonic):
+        self.name, self.factory, self.resident, self.idle_sec, self.clock = name, factory, resident, idle_sec, clock
+        self.lock = threading.Lock()
+        self.proc = None
+        self.conn = None
+        self.last_used = 0.0
+
+    @property
+    def loaded(self) -> bool:
+        return self.proc is not None and self.proc.is_alive()
+
+    def _ensure(self) -> None:
+        if self.loaded:
+            return
+        self._stop()
+        import multiprocessing
+        ctx = multiprocessing.get_context("spawn")
+        parent, child = ctx.Pipe()
+        t0 = time.time()
+        proc = ctx.Process(target=_worker_main, args=(child, self.factory), daemon=True, name=f"speech-{self.name}")
+        proc.start()
+        child.close()
+        try:
+            ok, msg = parent.recv()
+        except EOFError:
+            ok, msg = False, "worker exited while loading"
+        if not ok:
+            proc.kill()
+            proc.join(5)
+            raise RuntimeError(f"{self.name}: {msg}")
+        self.proc, self.conn = proc, parent
+        log(f"loaded {self.name} in a worker (pid {proc.pid}) in {time.time() - t0:.1f} s")
+
+    def _stop(self) -> None:
+        if self.proc is not None:
+            if self.proc.is_alive():
+                self.proc.kill()
+            self.proc.join(5)
+        if self.conn is not None:
+            self.conn.close()
+        self.proc = self.conn = None
+
+    def ensure_loaded(self) -> None:
+        with self.lock:
+            self._ensure()
+            self.last_used = self.clock()
+
+    def call(self, *args) -> Any:
+        with self.lock:
+            self._ensure()
+            try:
+                self.conn.send(args)
+                ok, result = self.conn.recv()
+            except (EOFError, OSError, BrokenPipeError):
+                self._stop()
+                raise RuntimeError(f"{self.name}: worker died during the call")
+            finally:
+                self.last_used = self.clock()
+        if not ok:
+            raise RuntimeError(result)
+        return result
+
+    def unload_if_idle(self) -> bool:
+        if self.resident or not self.loaded or self.clock() - self.last_used < self.idle_sec:
+            return False
+        if not self.lock.acquire(blocking=False):
+            return False
+        try:
+            self._stop()
+            log(f"unloaded {self.name} after {self.idle_sec:.0f} s idle (worker killed)")
+            return True
+        finally:
+            self.lock.release()
+
+    def close(self) -> None:
+        with self.lock:
+            self._stop()
+
+
+def _selftest_factory() -> Callable:
+    """Used by the tests: echoes (pid, args) from the worker, fails on "boom"."""
+    def fn(*args):
+        if args and args[0] == "boom":
+            raise ValueError("selftest failure")
+        return os.getpid(), list(args)
+    return fn
 
 
 # ---------------------------------------------------------------- real engines (imported lazily: heavy deps)
@@ -139,11 +259,19 @@ def load_whisper() -> Callable[[bytes, str], Dict[str, Any]]:
     return transcribe
 
 
-def default_models() -> Dict[str, LazyModel]:
+def tts_en_factory():
+    return load_pocket_tts("en")
+
+
+def tts_pt_factory():
+    return load_pocket_tts("pt")
+
+
+def default_models() -> Dict[str, WorkerModel]:
     return {
-        "tts-en": LazyModel("tts-en", lambda: load_pocket_tts("en"), resident="tts-en" in RESIDENT),
-        "tts-pt": LazyModel("tts-pt", lambda: load_pocket_tts("pt"), resident="tts-pt" in RESIDENT),
-        "stt": LazyModel("stt", load_whisper, resident="stt" in RESIDENT),
+        "tts-en": WorkerModel("tts-en", tts_en_factory, resident="tts-en" in RESIDENT),
+        "tts-pt": WorkerModel("tts-pt", tts_pt_factory, resident="tts-pt" in RESIDENT),
+        "stt": WorkerModel("stt", load_whisper, resident="stt" in RESIDENT),
     }
 
 
@@ -219,7 +347,7 @@ def make_handler(models: Dict[str, LazyModel], token: str):
             if not text or len(text) > MAX_TEXT_CHARS:
                 return self._json(400, {"error": f"text must be 1..{MAX_TEXT_CHARS} characters"})
             t0 = time.time()
-            wav = models[f"tts-{lang}"].use(lambda synth: synth(text))
+            wav = models[f"tts-{lang}"].call(text)
             self.send_response(200)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("Content-Length", str(len(wav)))
@@ -241,7 +369,7 @@ def make_handler(models: Dict[str, LazyModel], token: str):
             if m.loaded:
                 m.last_used = m.clock()                       # keep it a little longer
                 return self._json(200, {"model": name, "state": "loaded"})
-            threading.Thread(target=m.use, args=(lambda _obj: None,), daemon=True).start()
+            threading.Thread(target=m.ensure_loaded, daemon=True).start()
             self._json(202, {"model": name, "state": "loading"})
 
         def _stt(self, language: str):
@@ -251,7 +379,7 @@ def make_handler(models: Dict[str, LazyModel], token: str):
             if wav is None:
                 return
             t0 = time.time()
-            result = models["stt"].use(lambda transcribe: transcribe(wav, language))
+            result = models["stt"].call(wav, language)
             result["stt_sec"] = round(time.time() - t0, 2)
             self._json(200, result)
 
@@ -279,7 +407,7 @@ def main() -> None:
     threading.Thread(target=_reaper, args=(httpd.models, stop), daemon=True).start()
     for name, m in httpd.models.items():          # resident models load before /health turns green
         if m.resident:
-            m.use(lambda _obj: None)
+            m.ensure_loaded()
 
     def _stop(signum, _frame):
         stop.set()

@@ -200,3 +200,38 @@ class TestWarm(ServiceCase):
     def test_warm_rejects_unknown_models_and_needs_the_token(self):
         self.assertEqual(self.call("/warm", json.dumps({"model": "gpt"}).encode())[0], 400)
         self.assertEqual(self.call("/warm", json.dumps({"model": "stt"}).encode(), token=None)[0], 401)
+
+
+class TestWorkerProcess(unittest.TestCase):
+    """Models run in a child process, so unloading really returns the memory (gc inside one process does not)."""
+
+    def test_calls_go_to_a_child_process_that_is_killed_when_idle(self):
+        import os
+        clock = FakeClock()
+        m = ss.WorkerModel("echo", ss._selftest_factory, idle_sec=60, clock=clock)
+        self.assertFalse(m.loaded)
+        pid, args = m.call("hi", 2)
+        self.assertNotEqual(pid, os.getpid())                     # ran in a child
+        self.assertEqual(args, ["hi", 2])
+        self.assertTrue(m.loaded)
+        clock.t += 61
+        self.assertTrue(m.unload_if_idle())
+        self.assertFalse(m.loaded)                                 # child gone, memory returned
+        pid2, _ = m.call("again")
+        self.assertNotEqual(pid2, pid)                             # reloaded in a fresh child
+        m.close()
+
+    def test_errors_in_the_child_become_exceptions(self):
+        m = ss.WorkerModel("echo", ss._selftest_factory)
+        with self.assertRaises(RuntimeError) as ctx:
+            m.call("boom")
+        self.assertIn("selftest failure", str(ctx.exception))
+        m.close()
+
+    def test_a_crashed_child_is_restarted_on_the_next_call(self):
+        m = ss.WorkerModel("echo", ss._selftest_factory)
+        m.call("x")
+        m.proc.kill()
+        m.proc.join(5)
+        self.assertEqual(m.call("y")[1], ["y"])
+        m.close()
