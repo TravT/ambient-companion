@@ -6,6 +6,7 @@ HTTP front-end for the ambient companion (PRJ-12 / ADR-42).
   GET  /health  liveness only, never touches ADB (used by Nomad check_restart)
   GET  /ready   live ADB / thermal / llama-server / TTS state as JSON
   POST /mcp     one JSON-RPC 2.0 request (same tools as the stdio server), bearer-token protected
+  POST /listen  push-to-talk (ambient_listen) for the dashboard Talk button, bearer-token protected
 
 Stdlib only. `python3 server.py serve` starts it; the stdio server is unchanged.
 """
@@ -43,7 +44,7 @@ def _make_handler(token: str):
         def do_GET(self):
             if self.path == "/":
                 self._send(200, {"service": server.SERVER_NAME, "version": server.SERVER_VERSION,
-                                 "endpoints": ["/health", "/ready", "POST /mcp"]})
+                                 "endpoints": ["/health", "/ready", "POST /mcp", "POST /listen"]})
             elif self.path == "/health":
                 self._send(200, {"status": "ok", "version": server.SERVER_VERSION})
             elif self.path == "/ready":
@@ -63,12 +64,15 @@ def _make_handler(token: str):
             return None
 
         def do_POST(self):
-            if self.path != "/mcp":
+            if self.path not in ("/mcp", "/listen"):
                 self._send(404, {"error": "not found"})
                 return
             denied = self._authorized()
             if denied:
                 self._send(denied, {"error": "unauthorized"})
+                return
+            if self.path == "/listen":
+                self._listen()
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -95,6 +99,30 @@ def _make_handler(token: str):
                 self._send(202)
             else:
                 self._send(200, resp)
+
+        def _listen(self):
+            """Push-to-talk for the dashboard Talk button: optional JSON {answer, language, source, play_audio, max_sec}."""
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                length = -1
+            if length < 0 or length > MAX_BODY_BYTES:
+                self._send(400, {"error": "invalid body size"})
+                return
+            try:
+                req = json.loads(self.rfile.read(length)) if length else {}
+                if not isinstance(req, dict):
+                    raise ValueError("request must be a JSON object")
+            except ValueError:
+                self._send(400, {"error": "invalid JSON"})
+                return
+            args = {k: req[k] for k in ("answer", "language", "source", "play_audio", "max_sec") if k in req}
+            res = server.handle_tool_call("ambient_listen", args)
+            text = res["content"][0]["text"] if res.get("content") else ""
+            if res.get("isError"):
+                self._send(409 if "busy" in text else 500, {"error": text})
+                return
+            self._send(200, json.loads(text))
 
     return Handler
 

@@ -558,6 +558,8 @@ def tts_available() -> bool:
         return False
     if mode == "host":
         return bool(POCKET_TTS_BIN)
+    if mode == "dell" and speech_service_up():
+        return True
     out, _ = run_edge_command(f"command -v {shlex.quote(config.EDGE_TTS_BIN)}", timeout=10)
     return out.startswith("/")
 
@@ -648,20 +650,20 @@ def split_for_speech(text: str, first_max: int = 9, rest_max: int = 11) -> List[
     return chunks
 
 
-def speak_on_edge_chunked(text: str, language: str) -> dict:
-    """Synthesize chunk N+1 on the phone while chunk N is playing, so audio starts after the first chunk only."""
+def _speak_chunked(text: str, language: str, produce, cleanup, where: str) -> dict:
+    """Produce chunk N+1 while chunk N plays on the phone, so audio starts after the first chunk only.
+
+    `produce(chunk, i)` returns (remote_wav, ok); `cleanup(remote_wav)` deletes it on the phone. A result without
+    "first_audio_sec" and with status "error" and played False means the FIRST chunk never got produced: the caller
+    may fall back to another voice path.
+    """
     t0 = time.time()
-    if not ensure_edge_tts_server():
-        return speak_on_edge(text, language)
     chunks = split_for_speech(text)
-    stamp = int(time.time() * 1000)
     ready: "queue.Queue" = queue.Queue()
 
     def producer() -> None:
         for i, chunk in enumerate(chunks):
-            wav = f"{EDGE_TERMUX_HOME}/tts_{stamp}_{i}.wav"
-            out, _ = run_edge_command(_warm_synth_command(chunk, language, wav), timeout=90)
-            ok = "SYNTH_OK" in out
+            wav, ok = produce(chunk, i)
             ready.put((wav, ok))
             if not ok:
                 break
@@ -682,7 +684,7 @@ def speak_on_edge_chunked(text: str, language: str) -> dict:
         if first_audio is None:
             if not ensure_edge_audio():
                 audio_error = "phone audio (PulseAudio) is down and could not be restarted"
-                run_edge_command(f"rm -f {shlex.quote(wav)}", timeout=10)
+                cleanup(wav)
                 break
             first_audio = time.time() - t0
             subprocess.run(adb_args("shell", "cmd media_session volume --stream 3 --set 5"),
@@ -691,23 +693,113 @@ def speak_on_edge_chunked(text: str, language: str) -> dict:
         played_any = played_any or ok
         if not ok and not audio_error:
             audio_error = detail or "paplay failed on the phone"
-        run_edge_command(f"rm -f {shlex.quote(wav)}", timeout=10)
+        cleanup(wav)
     worker.join(timeout=60)
     if audio_error and first_audio is None:
         return {"status": "error", "played": False, "language": language, "error": audio_error,
-                "duration_sec": round(time.time() - t0, 2), "where": "s20-warm-chunked"}
-    if first_audio is None:                 # the first chunk never synthesized: use the single-shot path
-        return speak_on_edge(text, language)
+                "duration_sec": round(time.time() - t0, 2), "where": where}
+    if first_audio is None:
+        return {"status": "error", "played": False, "language": language, "where": where,
+                "duration_sec": round(time.time() - t0, 2), "error": "the first chunk could not be synthesized"}
     result = {"status": "success" if played_any else "error", "played": played_any, "language": language,
-              "duration_sec": round(time.time() - t0, 2), "first_audio_sec": round(first_audio, 2),
-              "where": "s20-warm-chunked"}
+              "duration_sec": round(time.time() - t0, 2), "first_audio_sec": round(first_audio, 2), "where": where}
     if not played_any:
         result["error"] = audio_error or "paplay failed on the phone"
     return result
 
 
+def speak_on_edge_chunked(text: str, language: str) -> dict:
+    """Synthesize chunk N+1 on the phone while chunk N is playing (resident pocket-tts on the S20)."""
+    if not ensure_edge_tts_server():
+        return speak_on_edge(text, language)
+    stamp = int(time.time() * 1000)
+
+    def produce(chunk: str, i: int):
+        wav = f"{EDGE_TERMUX_HOME}/tts_{stamp}_{i}.wav"
+        out, _ = run_edge_command(_warm_synth_command(chunk, language, wav), timeout=90)
+        return wav, "SYNTH_OK" in out
+
+    res = _speak_chunked(text, language, produce,
+                         lambda wav: run_edge_command(f"rm -f {shlex.quote(wav)}", timeout=10), "s20-warm-chunked")
+    if res["status"] == "error" and "first_audio_sec" not in res and "PulseAudio" not in res.get("error", ""):
+        return speak_on_edge(text, language)        # the first chunk never synthesized: use the single-shot path
+    return res
+
+
+# ---------------------------------------------------------------- ambient-speech on the Dell (Phases E and F)
+
+def _speech_headers() -> dict:
+    return {"Authorization": f"Bearer {config.SPEECH_TOKEN}"} if config.SPEECH_TOKEN else {}
+
+
+def speech_service_up() -> bool:
+    try:
+        return requests.get(f"{config.SPEECH_URL}/health", timeout=2).status_code == 200
+    except Exception:
+        return False
+
+
+def synthesize_on_dell(text: str, language: str) -> Optional[bytes]:
+    """WAV bytes from ambient-speech (built-in default voices), or None."""
+    try:
+        r = requests.post(f"{config.SPEECH_URL}/tts", json={"text": text, "language": "pt" if language == "pt" else "en"},
+                          headers=_speech_headers(), timeout=60)
+    except Exception:
+        return None
+    return r.content if r.status_code == 200 and r.content[:4] == b"RIFF" else None
+
+
+def transcribe_on_dell(wav: bytes, language: str = "auto") -> dict:
+    """Speech to text with Whisper on the Dell. The first call after idle loads the model (a few seconds)."""
+    try:
+        r = requests.post(f"{config.SPEECH_URL}/stt?language={language}", data=wav,
+                          headers={**_speech_headers(), "Content-Type": "audio/wav"}, timeout=120)
+        if r.status_code != 200:
+            return {"status": "error", "error": f"ambient-speech answered HTTP {r.status_code}"}
+        res = r.json()
+    except Exception as err:
+        return {"status": "error", "error": f"ambient-speech unavailable: {err}"}
+    res["status"] = "success"
+    return res
+
+
+def _push_wav_to_edge(wav: bytes, name: str) -> Optional[str]:
+    """adb push into /data/local/tmp (readable by Termux's paplay; deleted after playing)."""
+    local = BENCHMARK_DIR / name
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_bytes(wav)
+    remote = f"/data/local/tmp/{safe_remote_name(name)}"
+    try:
+        r = subprocess.run(adb_args("push", str(local), remote), capture_output=True, timeout=30, check=False)
+    finally:
+        local.unlink(missing_ok=True)
+    return remote if r.returncode == 0 else None
+
+
+def _remove_on_edge(remote: str) -> None:
+    subprocess.run(adb_args("shell", f"rm -f {shlex.quote(remote)}"), capture_output=True, timeout=10, check=False)
+
+
+def speak_via_dell(text: str, language: str) -> dict:
+    """Synthesize each chunk on the Dell, push it to the phone and play it while the next one is synthesized."""
+    stamp = int(time.time() * 1000)
+
+    def produce(chunk: str, i: int):
+        wav = synthesize_on_dell(chunk, language)
+        remote = _push_wav_to_edge(wav, f"ambient_tts_{stamp}_{i}.wav") if wav else None
+        return remote, remote is not None
+
+    return _speak_chunked(text, language, produce, _remove_on_edge, "dell")
+
+
+def _speak_edge(text: str, language: str) -> dict:
+    if config.TTS_WARM and len(text.split()) > 9:
+        return speak_on_edge_chunked(text, language)
+    return speak_on_edge(text, language)
+
+
 def speak(text: str, language: str) -> dict:
-    """Speak `text` according to AMBIENT_TTS_MODE (edge | host | off)."""
+    """Speak `text` according to AMBIENT_TTS_MODE (dell | edge | host | off)."""
     mode = config.TTS_MODE
     if mode == "off":
         return {"status": "disabled", "played": False, "language": language}
@@ -716,9 +808,46 @@ def speak(text: str, language: str) -> dict:
         res = synthesize_speech(text, language, wav)
         res["played"] = bool(res.get("status") == "success" and play_audio_on_edge(wav))
         return res
-    if config.TTS_WARM and len(text.split()) > 9:
-        return speak_on_edge_chunked(text, language)
-    return speak_on_edge(text, language)
+    if mode == "dell":
+        if speech_service_up():
+            res = speak_via_dell(text, language)
+            if "first_audio_sec" in res or "PulseAudio" in res.get("error", ""):
+                return res                  # spoke, or the phone cannot play anything: another voice won't help
+        res = _speak_edge(text, language)
+        res["fallback_from"] = "dell"
+        return res
+    return _speak_edge(text, language)
+
+
+def listen_and_answer(answer: bool = True, language: str = "auto", source: str = "camera",
+                      play_audio: bool = True, max_sec: float = 12.0) -> dict:
+    """Push-to-talk: one utterance from the phone mic -> Whisper on the Dell -> (optionally) the ambient answer.
+
+    Half-duplex: the mic is closed before anything is spoken. Audio stays in memory and is never returned.
+    """
+    import listen
+
+    t0 = time.time()
+    cap = listen.capture_utterance(max_sec=max_sec)
+    out: dict = {"capture": {k: cap.get(k) for k in ("reason", "speech_sec", "total_sec")}}
+    if not cap.get("wav"):
+        out["status"] = "no_speech"
+        if play_audio:
+            speak("Sorry, I did not hear a question." if language != "pt" else "Desculpe, não ouvi a pergunta.",
+                  "pt" if language == "pt" else "en")
+        return out
+    stt = transcribe_on_dell(cap["wav"], language)
+    out["transcript"] = stt
+    if stt.get("status") != "success" or not str(stt.get("text", "")).strip():
+        out["status"] = "error" if stt.get("status") != "success" else "empty_transcript"
+        return out
+    if answer:
+        lang = stt.get("language") if stt.get("language") in ("en", "pt") else None
+        out["answer"] = execute_ambient_cycle(query=stt["text"], source=source, lang=lang, play_audio=play_audio,
+                                              crop_bbox=None, reuse_last_frame=False)
+    out["status"] = "success"
+    out["total_sec"] = round(time.time() - t0, 2)
+    return out
 
 
 _last_frame: Optional[Tuple[Path, float]] = None

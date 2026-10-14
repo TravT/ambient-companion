@@ -36,7 +36,7 @@ class TestHandleLine(ServiceCase):
     def test_forwards_a_request_and_returns_the_service_response(self):
         resp = mcp_proxy.handle_line(json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}), self.url, TOKEN)
         self.assertEqual(resp["id"], 7)
-        self.assertEqual(len(resp["result"]["tools"]), 5)
+        self.assertEqual(len(resp["result"]["tools"]), 6)
 
     def test_notifications_produce_no_output(self):
         line = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})

@@ -71,10 +71,12 @@ READ_PX = int(os.getenv("AMBIENT_READ_PX", "768"))
 GROUND_PX = int(os.getenv("AMBIENT_GROUND_PX", "1024"))
 
 # --- Voice ---
-# edge: pocket-tts runs on the S20 FE (Termux) and plays through paplay (default, PRJ-12 Phase 10)
+# dell: the ambient-speech service on the Dell synthesizes (default voices), the phone only plays (default,
+#       owner decision 2026-10-14); falls back to edge when the service is down
+# edge: pocket-tts runs on the S20 FE (Termux) and plays through paplay (PRJ-12 Phase 10)
 # host: synthesize here with POCKET_TTS_BIN, push the WAV to the phone (dev CLI on the Dell)
 # off:  never speak
-TTS_MODE = os.getenv("AMBIENT_TTS_MODE", "edge").lower()
+TTS_MODE = os.getenv("AMBIENT_TTS_MODE", "dell").lower()
 EDGE_TTS_BIN = os.getenv("EDGE_TTS_BIN", "pocket-tts")
 EDGE_VOICE_EN = os.getenv(
     "EDGE_VOICE_EN", f"{EDGE_TERMUX_HOME}/voices/voice_profile_user_optionB_full25s.safetensors"
@@ -102,6 +104,10 @@ SERVE_HOST = os.getenv("AMBIENT_HOST", "127.0.0.1")
 SERVE_PORT = int(os.getenv("AMBIENT_PORT", "8089"))
 # Bearer token for POST /mcp. Empty disables auth (loopback-only use).
 API_TOKEN = os.getenv("AMBIENT_API_TOKEN", "")
+
+# --- ambient-speech (TTS/STT on the Dell, loopback) ---
+SPEECH_URL = os.getenv("AMBIENT_SPEECH_URL", "http://127.0.0.1:8091").rstrip("/")
+SPEECH_TOKEN = os.getenv("AMBIENT_SPEECH_TOKEN") or API_TOKEN
 # Seconds a tool call waits for the camera/ADB before answering "busy".
 HARDWARE_LOCK_TIMEOUT_SEC = float(os.getenv("AMBIENT_LOCK_TIMEOUT", "240"))
 

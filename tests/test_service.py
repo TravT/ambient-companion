@@ -19,7 +19,7 @@ import server
 
 EXPECTED_TOOLS = {
     "ambient_escalation_cycle", "ambient_triage_scene", "ambient_ocr_and_grounding",
-    "ambient_speak", "ambient_hardware_status",
+    "ambient_speak", "ambient_hardware_status", "ambient_listen",
 }
 
 

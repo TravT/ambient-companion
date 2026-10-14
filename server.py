@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.7.3"
+SERVER_VERSION = "2.8.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -33,7 +33,7 @@ PROTOCOL_VERSION = "2024-11-05"
 HARDWARE_LOCK = threading.Lock()
 HARDWARE_TOOLS = {
     "ambient_escalation_cycle", "ambient_triage_scene",
-    "ambient_ocr_and_grounding", "ambient_speak",
+    "ambient_ocr_and_grounding", "ambient_speak", "ambient_listen",
 }
 
 
@@ -82,6 +82,7 @@ def readiness() -> dict:
         "gpu_url": daemon.active_gpu_url(),
         "tts_available": daemon.tts_available(),
         "audio": daemon.edge_audio_ok(),
+        "speech": daemon.speech_service_up(),
     }
 
 
@@ -117,7 +118,7 @@ TOOLS = [
                     "type": "string",
                     "enum": ["auto", "en", "pt"],
                     "default": "auto",
-                    "description": "Voice output language: 'auto' (detect from query), 'en' (Option B 25s user cloned voice), or 'pt' (Rafael Portuguese studio voice)."
+                    "description": "Voice output language: 'auto' (detect from query), 'en' or 'pt' (built-in pocket-tts voices, synthesized on the Dell)."
                 },
                 "crop_bbox": {
                     "type": "array",
@@ -212,8 +213,9 @@ TOOLS = [
     {
         "name": "ambient_speak",
         "description": (
-            "Synthesizes natural speech using Kyutai Pocket-TTS and plays it aloud via the Galaxy S20 FE hardware stereo speaker. "
-            "Uses the user's personal cloned voice for English (Option B 25s sample) or the Rafael studio voice for Brazilian Portuguese."
+            "Speaks text aloud on the Galaxy S20 FE speaker. Synthesized on the Dell by the ambient-speech service with Kyutai "
+            "pocket-tts built-in voices (English 'alba', Portuguese 'rafael'); the phone only plays. Falls back to synthesis "
+            "on the phone if the service is down."
         ),
         "parameters": {
             "type": "object",
@@ -226,7 +228,7 @@ TOOLS = [
                     "type": "string",
                     "enum": ["en", "pt"],
                     "default": "en",
-                    "description": "Language and voice profile: 'en' (Option B cloned voice) or 'pt' (Rafael Portuguese)."
+                    "description": "Language: 'en' or 'pt' (built-in voice of that language)."
                 }
             },
             "required": ["text"]
@@ -241,6 +243,28 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {}
+        }
+    },
+    {
+        "name": "ambient_listen",
+        "description": (
+            "Push-to-talk: listen ONCE on the S20 FE microphone (until the speaker stops, at most max_sec), transcribe "
+            "on the Dell with Whisper (English or Portuguese), and by default answer the spoken question about what the "
+            "camera sees, aloud, exactly like ambient_escalation_cycle. Half-duplex (the mic is closed while the phone "
+            "speaks); audio stays in memory and is never stored. No wake word: only call it when the user asks to talk."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "answer": {"type": "boolean", "default": True,
+                           "description": "Answer the transcribed question (true) or only return the transcript (false)."},
+                "language": {"type": "string", "enum": ["auto", "en", "pt"], "default": "auto",
+                             "description": "Spoken language; auto detects English or Portuguese."},
+                "source": {"type": "string", "default": "camera",
+                           "description": "Optical source for the answer: 'camera', 'droidcam', 'http://...', 'rtsp://...', or file path."},
+                "play_audio": {"type": "boolean", "default": True, "description": "Speak the answer on the phone."},
+                "max_sec": {"type": "number", "default": 12, "description": "Longest utterance to record, in seconds."}
+            }
         }
     }
 ]
@@ -402,6 +426,16 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 ]
             }
 
+        elif tool_name == "ambient_listen":
+            result = daemon.listen_and_answer(
+                answer=bool(arguments.get("answer", True)),
+                language=arguments.get("language", "auto"),
+                source=arguments.get("source", "camera"),
+                play_audio=bool(arguments.get("play_audio", True)),
+                max_sec=float(arguments.get("max_sec", 12)),
+            )
+            return {"content": [{"type": "text", "text": json.dumps(result, indent=2, ensure_ascii=False)}]}
+
         elif tool_name == "ambient_hardware_status":
             r = readiness()
             temp = f"{r['edge_temp_c']:.1f}°C" if r["edge_temp_c"] is not None else "UNKNOWN (edge unreachable)"
@@ -417,6 +451,7 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 f"- RTX 5070 desktop: {'AWAKE and serving the VLM (used first for Tier 2)' if r['backends']['gpu'] else 'not serving the VLM now (asleep, in Windows, or running Strata; never woken or switched by the companion)'}\n"
                 f"- MateBook satellite: {'AWAKE (used before the Dell for Tier 2)' if r['backends']['satellite'] else 'asleep or offline (never woken by the companion)'}\n"
                 f"- Phone audio (PulseAudio): {'OK' if r.get('audio') else 'DOWN (restarted automatically before the next spoken answer)'}\n"
+                f"- Speech service on the Dell (voices + Whisper): {'UP' if r.get('speech') else 'DOWN (voice falls back to the phone; push-to-talk unavailable)'}\n"
                 f"- Voice (pocket-tts, mode {config.TTS_MODE}): {'available' if r['tts_available'] else 'unavailable (not installed on the S20, or disabled)'}"
             )
             return {

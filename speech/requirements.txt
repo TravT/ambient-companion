@@ -1,0 +1,3 @@
+# ambient-speech runtime (torch comes from the CPU-only index in the Dockerfile)
+pocket-tts==3.3.0
+faster-whisper==1.2.1

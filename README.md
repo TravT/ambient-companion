@@ -153,10 +153,23 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | `AMBIENT_SCENE_PX` / `AMBIENT_READ_PX` / `AMBIENT_GROUND_PX` | `512` / `768` / `1024` | Longest side sent to Tier 2 for scenes, for reading and for locate questions (crops go up to 1024; the GPU always gets 1024). Locate needs 1024: click error was 7-60 px at 512, 10-173 px at 768 and 0-6 px at 1024 |
 | `AMBIENT_LAST_FRAME_TTL` / `AMBIENT_SPEAK_MAX_WORDS` | `60` / `28` | How long `reuse_last_frame` may re-use the previous frame, and how many words of an answer are spoken (the full answer is always returned as text) |
 | `AMBIENT_RETENTION_DAYS` | `7` | Age after which cached frames/WAVs are deleted |
-| `AMBIENT_TTS_MODE` | `edge` | `edge`: pocket-tts runs on the S20 FE (Termux) and plays via `paplay`; `host`: synthesize locally with `POCKET_TTS_BIN` and push the WAV (dev CLI); `off`: never speak |
+| `AMBIENT_TTS_MODE` | `dell` | `dell`: the `ambient-speech` service synthesizes on the Dell (built-in voices), the phone only plays (falls back to `edge` when the service is down); `edge`: pocket-tts runs on the S20 FE (Termux) and plays via `paplay`; `host`: synthesize locally with `POCKET_TTS_BIN` and push the WAV (dev CLI); `off`: never speak |
+| `AMBIENT_SPEECH_URL` / `AMBIENT_SPEECH_TOKEN` | `http://127.0.0.1:8091` / `AMBIENT_API_TOKEN` | The `ambient-speech` service (voices + Whisper), see below |
 | `EDGE_TTS_BIN` / `EDGE_VOICE_EN` / `EDGE_VOICE_PT` | `pocket-tts` / `~/voices/voice_profile_user_optionB_full25s.safetensors` / `rafael` | Voice backend and profiles inside Termux |
 | `AMBIENT_TTS_WARM` / `EDGE_TTS_PORT` | `1` / `8765` | Keep `pocket-tts serve` resident on the phone (about 0.9 GB RAM, started on demand by the companion). Short phrases take ~2 s instead of ~8 s; `0` uses the per-call CLI |
 | `POCKET_TTS_BIN` | `pocket-tts` on `PATH` | Host mode only (absent in the container) |
+
+---
+
+### Speech service (`speech/`, image `ghcr.io/travt/ambient-speech`)
+
+A second image built by the same CI: `speech/speech_service.py` serves `POST /tts` (JSON text and language, returns
+WAV) and `POST /stt` (16 kHz mono WAV, returns the transcript) on `127.0.0.1:8091`, bearer token as the companion.
+Models are mounted read-only at `/models` and loaded offline (`HF_HUB_OFFLINE=1`): pocket-tts files in the hub cache
+layout under `/models/hf`, faster-whisper `small` in `/models/faster-whisper-small`. Memory on the Dell CPU: the
+English voice stays loaded (~0.95 GB RSS measured, int8 quantization did not reduce it); the Portuguese voice and
+Whisper load on first use and are dropped after `SPEECH_IDLE_UNLOAD_SEC` (600 s) idle. A short sentence takes about
+2 s to synthesize, about half its playback time.
 
 ---
 
@@ -167,7 +180,8 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 | `ambient_escalation_cycle` | Routed answer (GPU when awake, else by question shape), spoken cue while the Dell works, and the answer spoken on the phone. Supports `crop_bbox` for focused macro zoom. | `query` (str), `source` (str), `language` ("auto"\|"en"\|"pt"), `crop_bbox` (list[int]), `play_audio` (bool) |
 | `ambient_triage_scene` | Tier 1 Edge triage strictly on Snapdragon 865 CPU (<8s, 0 cloud tokens). **Cannot read fine text.** | `query` (str), `source` (str), `crop_bbox` (list[int]) |
 | `ambient_ocr_and_grounding` | Tier 2 Homelab inference (Qwen2.5-VL-3B). High-precision reading, pill labels, and 2D bounding boxes. Supports RoI Crop-on-Demand with automatic parent coordinate remapping. Returns `click_x` / `click_y` pixel targets for locate questions. | `query` (str), `source` (str), `crop_bbox` (list[int]), `max_tokens` (int) |
-| `ambient_speak` | Kyutai Pocket-TTS voice cloning (<150ms TTFA) + S20 FE stereo speaker playback. | `text` (str), `language` ("en"\|"pt") |
+| `ambient_speak` | Kyutai pocket-tts built-in voices (EN `alba`, PT `rafael`) synthesized on the Dell, played on the S20 FE speaker (phone synthesis as fallback). | `text` (str), `language` ("en"\|"pt") |
+| `ambient_listen` | Push-to-talk: one utterance from the S20 FE mic, Whisper on the Dell, then (by default) the spoken answer about the camera view. Half-duplex, audio kept in memory. Also `POST /listen` (bearer) for the dashboard Talk button. | `answer` (bool), `language` ("auto"\|"en"\|"pt"), `source` (str), `play_audio` (bool), `max_sec` (number) |
 | `ambient_hardware_status` | Telemetry: battery percentage, temperature (<40.0°C safety breaker), ADB state, and llama-server health. | *None* |
 
 ---

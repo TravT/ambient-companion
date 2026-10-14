@@ -21,6 +21,7 @@ Backends are only used if their /health answers; nothing is ever woken.
 
 import argparse
 import json
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -100,7 +101,7 @@ def run(cases_file: Path, backends: List[str], sizes: List[int], limit: Optional
                         boxes = oi.parse_grounding_coordinates(
                             answer, meta["original_width"], meta["original_height"], None, model_size=model_size
                         ) if q.get("kind") == "locate" else []
-                        row = {"case": case["id"], "q": q["q"], "kind": q.get("kind", "describe"), "backend": backend,
+                        row = {"case": case["id"], "group": case.get("group", ""), "q": q["q"], "kind": q.get("kind", "describe"), "backend": backend,
                                "px": px, "score": score_question(q, answer, boxes), "latency": round(latency, 2),
                                "cold": n == 0, "tokens": res.get("prompt_tokens", 0), "answer": answer[:160],
                                "click_error": scoring.click_error(boxes, tuple(q["expect_click"])) if q.get("kind") == "locate" else None,
@@ -112,6 +113,17 @@ def run(cases_file: Path, backends: List[str], sizes: List[int], limit: Optional
     return rows
 
 
+def group_summary(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Accuracy and median latency per (photo group, backend, size), sorted by group."""
+    buckets: Dict[tuple, List[Dict[str, Any]]] = {}
+    for r in rows:
+        buckets.setdefault((r.get("group", ""), r["backend"], r["px"]), []).append(r)
+    return [{"group": g, "backend": b, "px": px, "n": len(rs),
+             "accuracy": sum(r["score"] for r in rs) / len(rs),
+             "median_latency": round(statistics.median(r["latency"] for r in rs), 1)}
+            for (g, b, px), rs in sorted(buckets.items())]
+
+
 def print_summary(rows: List[Dict[str, Any]]) -> None:
     def table(title: str, subset: List[Dict[str, Any]]) -> None:
         print(f"\n{title}\n\n| kind | backend | px | n | accuracy | median latency |\n| --- | --- | ---: | ---: | ---: | ---: |")
@@ -119,6 +131,10 @@ def print_summary(rows: List[Dict[str, Any]]) -> None:
             print(f"| {r['kind']} | {r['backend']} | {r['px']} | {r['n']} | {r['accuracy']:.0%} | {r['median_latency']} s |")
     table("All questions", rows)
     table("First question per image/size/backend only (cold image, no cache help)", [r for r in rows if r["cold"]])
+    if any(r.get("group") for r in rows):
+        print("\nPer photo group\n\n| group | backend | px | n | accuracy | median latency |\n| --- | --- | ---: | ---: | ---: | ---: |")
+        for r in group_summary(rows):
+            print(f"| {r['group']} | {r['backend']} | {r['px']} | {r['n']} | {r['accuracy']:.0%} | {r['median_latency']} s |")
 
 
 def main() -> int:

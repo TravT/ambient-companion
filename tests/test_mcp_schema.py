@@ -54,7 +54,7 @@ class TestToolSchemas(unittest.TestCase):
 
     def test_every_tool_has_an_object_input_schema(self):
         for label, tools in self._each_path():
-            self.assertEqual(len(tools), 5, label)
+            self.assertEqual(len(tools), 6, label)
             for t in tools:
                 with self.subTest(path=label, tool=t["name"]):
                     self.assertIn("inputSchema", t)

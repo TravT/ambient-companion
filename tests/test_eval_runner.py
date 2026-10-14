@@ -57,6 +57,35 @@ class TestRunner(unittest.TestCase):
             self.assertTrue(out.exists())
             # the very first question of each image/size/backend is flagged cold
             self.assertTrue(rows[0]["cold"])
+            self.assertTrue(all("group" in r for r in rows))
+
+    def test_rows_carry_the_case_group(self):
+        with tempfile.TemporaryDirectory() as d:
+            cases_path = make_synthetic.build(Path(d) / "set")
+            cases = run_eval.load_cases(cases_path)[:1]
+            cases[0]["group"] = "text"
+            fake = {"status": "success", "content": "Yes.", "prompt_tokens": 1}
+            with mock.patch.object(run_eval, "load_cases", return_value=cases), \
+                    mock.patch.object(run_eval, "backend_urls", return_value={"gpu": None, "satellite": None, "dell": "http://d/v1"}), \
+                    mock.patch.object(daemon, "query_tier2_qwen", return_value=fake):
+                rows = run_eval.run(cases_path, ["dell"], [512], limit=None, out=Path(d) / "r.jsonl")
+            self.assertEqual({r["group"] for r in rows}, {"text"})
+
+
+class TestGroupSummary(unittest.TestCase):
+    def test_accuracy_and_latency_per_group_backend_and_size(self):
+        rows = [
+            {"group": "text", "backend": "dell", "px": 768, "score": 1.0, "latency": 10.0},
+            {"group": "text", "backend": "dell", "px": 768, "score": 0.0, "latency": 30.0},
+            {"group": "text", "backend": "dell", "px": 1024, "score": 1.0, "latency": 50.0},
+            {"group": "absence", "backend": "dell", "px": 768, "score": 1.0, "latency": 5.0},
+        ]
+        got = {(r["group"], r["px"]): r for r in run_eval.group_summary(rows)}
+        self.assertEqual(got[("text", 768)]["n"], 2)
+        self.assertAlmostEqual(got[("text", 768)]["accuracy"], 0.5)
+        self.assertEqual(got[("text", 768)]["median_latency"], 20.0)
+        self.assertEqual(got[("absence", 768)]["accuracy"], 1.0)
+        self.assertEqual(list(got)[0][0], "absence")                       # sorted by group
 
 
 if __name__ == "__main__":
