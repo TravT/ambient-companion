@@ -101,3 +101,18 @@ class TestSummary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestKeywordPhrases(unittest.TestCase):
+    def test_multi_word_and_punctuated_targets_match_as_phrases(self):
+        self.assertEqual(scoring.score_keywords("open from 7:00 to 21:00.", any_of=["21:00"]), 1.0)
+        self.assertEqual(scoring.score_keywords("It is Big Ben in London", any_of=["big ben"]), 1.0)
+        self.assertEqual(scoring.score_keywords("until 9 p.m. daily", any_of=["9 p.m"]), 1.0)
+
+    def test_simple_plurals_count(self):
+        self.assertEqual(scoring.score_keywords("The bowl contains apples.", any_of=["apple"]), 1.0)
+        self.assertEqual(scoring.score_keywords("two red scooters", all_of=["red", "scooter"]), 1.0)
+
+    def test_no_partial_word_matches(self):
+        self.assertEqual(scoring.score_keywords("a pineapple", any_of=["apple"]), 0.0)
+        self.assertEqual(scoring.score_keywords("redness", all_of=["red"]), 0.0)
