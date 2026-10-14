@@ -25,7 +25,7 @@ import daemon
 import optical_ingestion
 
 SERVER_NAME = "ambient-companion"
-SERVER_VERSION = "2.8.2"
+SERVER_VERSION = "2.8.3"
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -421,7 +421,13 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "content": [
                     {
                         "type": "text",
-                        "text": f"Speech Playback Status:\n- Text: \"{text}\"\n- Language: {lang}\n- Synthesized in: {speech.get('duration_sec', 0)}s\n- S20 FE Speaker Playback: {outcome}"
+                        "text": (
+                            f"Speech Playback Status:\n- Text: \"{text}\"\n- Language: {lang}\n"
+                            f"- Generated on: {speech.get('where', 'unknown')}"
+                            f"{' (fallback from ' + speech['fallback_from'] + ')' if speech.get('fallback_from') else ''}\n"
+                            + (f"- First audio after: {speech['first_audio_sec']}s\n" if speech.get("first_audio_sec") is not None else "")
+                            + f"- Total (synthesis + playback): {speech.get('duration_sec', 0)}s\n- S20 FE Speaker Playback: {outcome}"
+                        )
                     }
                 ]
             }

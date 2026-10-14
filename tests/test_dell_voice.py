@@ -255,3 +255,13 @@ class TestPrewarm(unittest.TestCase):
                 mock.patch("listen.capture_utterance", side_effect=lambda **k: order.append("capture") or cap):
             daemon.listen_and_answer(play_audio=False)
         self.assertEqual(order[:2], ["stt", "capture"])
+
+
+class TestSpeakToolText(unittest.TestCase):
+    def test_reports_where_first_audio_and_fallback(self):
+        res = {"status": "success", "played": True, "duration_sec": 6.6, "first_audio_sec": 2.1, "where": "s20-warm",
+               "fallback_from": "dell"}
+        with mock.patch.object(daemon, "speak", return_value=res):
+            text = server.handle_tool_call("ambient_speak", {"text": "hi", "language": "en"})["content"][0]["text"]
+        self.assertIn("Generated on: s20-warm (fallback from dell)", text)
+        self.assertIn("First audio after: 2.1s", text)
