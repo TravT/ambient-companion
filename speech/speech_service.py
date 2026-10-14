@@ -4,7 +4,7 @@ ambient-speech: text-to-speech and speech-to-text for the companion, on the Dell
 
   GET  /health   liveness, plus which models are loaded right now
   POST /tts      JSON {"text": ..., "language": "en"|"pt"}  ->  audio/wav (pocket-tts, built-in default voices)
-  POST /stt      body = WAV (16 kHz, mono, 16-bit); ?language=en|pt|auto  ->  JSON {"text", "language", ...}
+  POST /stt      body = 16-bit WAV (any rate/channels, resampled to 16 kHz mono); ?language=en|pt|auto -> JSON
   POST /warm     JSON {"model": "tts-en"|"tts-pt"|"stt"}: load it in the background now (202), so it is ready when used
 
 Loopback only; bearer token when SPEECH_TOKEN is set. Memory budget: the Dell has about 1.5-2.5 GB free and each
@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 LANGUAGES = {"en": "english", "pt": "portuguese"}
 MAX_TEXT_CHARS = int(os.getenv("SPEECH_MAX_TEXT_CHARS", "600"))
 MAX_AUDIO_BYTES = int(os.getenv("SPEECH_MAX_AUDIO_BYTES", str(16000 * 2 * 30 + 44)))   # 30 s of 16 kHz 16-bit mono
@@ -105,14 +105,21 @@ def load_pocket_tts(language: str) -> Callable[[str], bytes]:
 
 
 def wav_to_float32(data: bytes):
+    """16-bit PCM WAV -> 16 kHz mono float32 for Whisper (pocket-tts writes 24 kHz, browsers often 48 kHz stereo)."""
     import numpy as np
-    with wave.open(io.BytesIO(data)) as w:
-        if w.getsampwidth() != 2 or w.getnchannels() != 1:
-            raise ValueError("expected 16-bit mono WAV")
-        rate = w.getframerate()
-        pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype("float32") / 32768.0
-    if rate != 16000:
-        raise ValueError(f"expected 16 kHz audio, got {rate} Hz")
+    try:
+        with wave.open(io.BytesIO(data)) as w:
+            if w.getsampwidth() != 2:
+                raise ValueError("expected 16-bit PCM WAV")
+            channels, rate = w.getnchannels(), w.getframerate()
+            pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype("float32") / 32768.0
+    except (wave.Error, EOFError) as err:
+        raise ValueError(f"not a WAV file: {err}") from err
+    if channels > 1:
+        pcm = pcm.reshape(-1, channels).mean(axis=1)
+    if rate != 16000 and len(pcm):
+        n_out = int(round(len(pcm) * 16000 / rate))
+        pcm = np.interp(np.linspace(0, len(pcm) - 1, n_out), np.arange(len(pcm)), pcm).astype("float32")
     return pcm
 
 

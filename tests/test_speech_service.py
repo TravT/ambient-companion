@@ -154,14 +154,25 @@ class TestLifecycle(ServiceCase):
 
 
 class TestWav(unittest.TestCase):
-    def test_wav_to_float32_checks_format(self):
+    def test_wav_to_float32_resamples_and_downmixes_to_16k_mono(self):
         try:
             import numpy  # noqa: F401
         except ImportError:
             self.skipTest("numpy not installed")
         self.assertEqual(len(ss.wav_to_float32(wav_bytes(0.25))), 4000)
+        self.assertEqual(len(ss.wav_to_float32(wav_bytes(0.25, rate=24000))), 4000)    # pocket-tts output
+        self.assertEqual(len(ss.wav_to_float32(wav_bytes(0.25, rate=48000))), 4000)    # browser recording
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x10\x00\x30" * 1600)                               # L=4096, R=12288
+        mono = ss.wav_to_float32(buf.getvalue())
+        self.assertEqual(len(mono), 1600)
+        self.assertAlmostEqual(float(mono[0]), (4096 + 12288) / 2 / 32768, places=4)
         with self.assertRaises(ValueError):
-            ss.wav_to_float32(wav_bytes(0.25, rate=8000))
+            ss.wav_to_float32(b"not a wav")
 
 
 if __name__ == "__main__":
