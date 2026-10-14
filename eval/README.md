@@ -58,3 +58,20 @@ an assistant that runs in the cloud, they leave the machine; the harness itself 
 * 49 of 54 questions fully correct. Locating: click error 0-6 px at 512, 768 and 1024 px. Counting, colors and presence: correct (the one "wrong" yes/no was a badly drawn plate in the synthetic image).
 * Reading (6 text images, English and Portuguese, 14/24/48 px fonts): 94% at 512 px, 89% at 768 px, 100% at 1024 px. At 768 px a Portuguese request was half translated into English; at 512 px small print was misread ("Dipiramina" for "Dipirona").
 * **Prompt wording did not help**: plain, English "transcribe exactly, do not translate", Portuguese equivalent and "OCR:" phrasings all gave the same output. Image size is the lever. 1024 px costs about 1.8x the time of 768 px (satellite 51 s against 29 s cold), so the reading budget (`AMBIENT_READ_PX`, 768 by default) is a trade-off to settle with real photos.
+
+## Findings with real photos (35 owner photos, 139 questions, 2026-10-14)
+
+Cases: `data/eval/photos/cases.yaml` (git-ignored, groups rooms-desks, text, counting-attributes, absence,
+location-bad-conditions). GPU and satellite ran all 35 photos at 512/768/1024 px; the Dell ran 22 (stopped during a
+memory incident). Scores after the scorer fix (multi-word phrases, plurals) with `--rescore`; failed backend calls
+are excluded.
+
+* **Backends agree** (same model): on the 22 shared photos 65-66% at 512 px, 76-78% at 768, 83-85% at 1024.
+  The backend only decides speed (cold image, median: GPU 0.2-0.3 s, satellite 20/38 s, Dell 36/65 s at 768/1024).
+* **Size matters more than anything else**: all backends pooled, presence 91/96/94%, counting 60/59/73%,
+  reading 44/62/69%, locating 76/90/94% (median click error 103/31/18 px), describe 91/90/100% at 512/768/1024 px.
+* By group at 512 -> 768 -> 1024: rooms-desks 72 -> 86 -> 87%, text 64 -> 73 -> 78%, counting-attributes
+  55 -> 63 -> 92%, absence 94 -> 94 -> 88% (false "yes" rises at 1024), location-bad-conditions 88 -> 89 -> 90%.
+* Reading: 768 vs 1024 px is 61 vs 66% (GPU), 61 vs 72% (satellite), 63 vs 70% (Dell), at about 1.8x the time.
+* The desktop's packaged llama.cpp (`llama-cpp 0.4.0-1`) aborts on a tall 1024 px image (473x1024) at any
+  temperature (`llama_sampler_dist_apply: Assertion 'found' failed`); the Dell (b11429) and satellite answer it.
