@@ -231,3 +231,27 @@ class TestListenHttp(unittest.TestCase):
             status, body = self.post(b"{}", self.TOKEN)
         self.assertEqual(status, 409)
         self.assertIn("busy", body["error"])
+
+
+class TestPrewarm(unittest.TestCase):
+    def test_prewarm_posts_the_model_and_never_raises(self):
+        with mock.patch.object(config, "TTS_MODE", "dell"), \
+                mock.patch.object(daemon.requests, "post", return_value=FakeResp(202)) as post:
+            daemon.prewarm_speech("tts-pt", wait=True)
+        self.assertTrue(post.call_args.args[0].endswith("/warm"))
+        self.assertEqual(post.call_args.kwargs["json"], {"model": "tts-pt"})
+        with mock.patch.object(daemon.requests, "post", side_effect=OSError("down")):
+            daemon.prewarm_speech("stt", wait=True)                       # silently ignored
+
+    def test_no_prewarm_outside_dell_mode(self):
+        with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(daemon.requests, "post") as post:
+            daemon.prewarm_speech("tts-en", wait=True)
+        post.assert_not_called()
+
+    def test_listen_prewarms_whisper_before_capturing(self):
+        order = []
+        cap = {"wav": None, "reason": "no_speech", "speech_sec": 0.0, "total_sec": 4.0}
+        with mock.patch.object(daemon, "prewarm_speech", side_effect=lambda m, wait=False: order.append(m)), \
+                mock.patch("listen.capture_utterance", side_effect=lambda **k: order.append("capture") or cap):
+            daemon.listen_and_answer(play_audio=False)
+        self.assertEqual(order[:2], ["stt", "capture"])

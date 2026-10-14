@@ -166,3 +166,26 @@ class TestWav(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWarm(ServiceCase):
+    def test_warm_loads_in_the_background_and_answers_202(self):
+        import time
+        status, _, body = self.call("/warm", json.dumps({"model": "stt"}).encode())
+        self.assertEqual(status, 202, body)
+        for _ in range(50):
+            if "stt" in self.loads:
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.loads, ["stt"])
+
+    def test_warm_on_a_loaded_model_is_a_no_op(self):
+        self.call("/tts", json.dumps({"text": "a", "language": "en"}).encode())
+        status, _, body = self.call("/warm", json.dumps({"model": "tts-en"}).encode())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["state"], "loaded")
+        self.assertEqual(self.loads, ["tts-en"])
+
+    def test_warm_rejects_unknown_models_and_needs_the_token(self):
+        self.assertEqual(self.call("/warm", json.dumps({"model": "gpt"}).encode())[0], 400)
+        self.assertEqual(self.call("/warm", json.dumps({"model": "stt"}).encode(), token=None)[0], 401)

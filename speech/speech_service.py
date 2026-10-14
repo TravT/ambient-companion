@@ -5,10 +5,13 @@ ambient-speech: text-to-speech and speech-to-text for the companion, on the Dell
   GET  /health   liveness, plus which models are loaded right now
   POST /tts      JSON {"text": ..., "language": "en"|"pt"}  ->  audio/wav (pocket-tts, built-in default voices)
   POST /stt      body = WAV (16 kHz, mono, 16-bit); ?language=en|pt|auto  ->  JSON {"text", "language", ...}
+  POST /warm     JSON {"model": "tts-en"|"tts-pt"|"stt"}: load it in the background now (202), so it is ready when used
 
-Loopback only; bearer token when SPEECH_TOKEN is set. Memory budget: the Dell has about 2 GB free, so only the
-English voice stays loaded (spoken answers start fast); the Portuguese voice and Whisper load on first use and are
-dropped after SPEECH_IDLE_UNLOAD_SEC without use. Models come from read-only mounts and are never downloaded here.
+Loopback only; bearer token when SPEECH_TOKEN is set. Memory budget: the Dell has about 1.5-2.5 GB free and each
+voice costs about 1 GB, so nothing is resident by default (SPEECH_RESIDENT): models load on first use or on /warm
+(the companion warms the voice when a question starts, while the image is analysed, and Whisper while the user
+speaks) and are dropped after SPEECH_IDLE_UNLOAD_SEC without use. Models come from read-only mounts and are never
+downloaded here.
 """
 
 import io
@@ -27,7 +30,7 @@ LANGUAGES = {"en": "english", "pt": "portuguese"}
 MAX_TEXT_CHARS = int(os.getenv("SPEECH_MAX_TEXT_CHARS", "600"))
 MAX_AUDIO_BYTES = int(os.getenv("SPEECH_MAX_AUDIO_BYTES", str(16000 * 2 * 30 + 44)))   # 30 s of 16 kHz 16-bit mono
 IDLE_UNLOAD_SEC = float(os.getenv("SPEECH_IDLE_UNLOAD_SEC", "600"))
-RESIDENT = {x.strip() for x in os.getenv("SPEECH_RESIDENT", "tts-en").split(",") if x.strip()}
+RESIDENT = {x.strip() for x in os.getenv("SPEECH_RESIDENT", "").split(",") if x.strip()}
 WHISPER_DIR = os.getenv("SPEECH_WHISPER_DIR", "/models/faster-whisper-small")
 THREADS = int(os.getenv("SPEECH_THREADS", "4"))
 
@@ -180,13 +183,15 @@ def make_handler(models: Dict[str, LazyModel], token: str):
 
         def do_POST(self):
             url = urlparse(self.path)
-            if url.path not in ("/tts", "/stt"):
+            if url.path not in ("/tts", "/stt", "/warm"):
                 return self._json(404, {"error": "not found"})
             if not self._authorized():
                 return self._json(401, {"error": "unauthorized"})
             try:
                 if url.path == "/tts":
                     return self._tts()
+                if url.path == "/warm":
+                    return self._warm()
                 return self._stt(parse_qs(url.query).get("language", ["auto"])[0])
             except Exception as err:  # never leak a traceback to the client
                 log(f"{url.path} failed: {err!r}")
@@ -214,6 +219,23 @@ def make_handler(models: Dict[str, LazyModel], token: str):
             self.send_header("X-Synth-Sec", f"{time.time() - t0:.2f}")
             self.end_headers()
             self.wfile.write(wav)
+
+        def _warm(self):
+            raw = self._body(200)
+            if raw is None:
+                return
+            try:
+                name = str(json.loads(raw).get("model", ""))
+            except (ValueError, AttributeError):
+                return self._json(400, {"error": "JSON body expected"})
+            if name not in models:
+                return self._json(400, {"error": f"model must be one of {sorted(models)}"})
+            m = models[name]
+            if m.loaded:
+                m.last_used = m.clock()                       # keep it a little longer
+                return self._json(200, {"model": name, "state": "loaded"})
+            threading.Thread(target=m.use, args=(lambda _obj: None,), daemon=True).start()
+            self._json(202, {"model": name, "state": "loading"})
 
         def _stt(self, language: str):
             if language not in ("auto", *LANGUAGES):

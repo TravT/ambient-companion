@@ -166,10 +166,11 @@ Run `setup_windows.bat` (creates a private venv, checks `http://ambient.home.arp
 A second image built by the same CI: `speech/speech_service.py` serves `POST /tts` (JSON text and language, returns
 WAV) and `POST /stt` (16 kHz mono WAV, returns the transcript) on `127.0.0.1:8091`, bearer token as the companion.
 Models are mounted read-only at `/models` and loaded offline (`HF_HUB_OFFLINE=1`): pocket-tts files in the hub cache
-layout under `/models/hf`, faster-whisper `small` in `/models/faster-whisper-small`. Memory on the Dell CPU: the
-English voice stays loaded (~0.95 GB RSS measured, int8 quantization did not reduce it); the Portuguese voice and
-Whisper load on first use and are dropped after `SPEECH_IDLE_UNLOAD_SEC` (600 s) idle. A short sentence takes about
-2 s to synthesize, about half its playback time.
+layout under `/models/hf`, faster-whisper `small` in `/models/faster-whisper-small`. Memory on the Dell CPU: a voice
+costs about 0.95 GB RSS (measured; int8 quantization did not reduce it) and the Dell has 1.5-2.5 GB free, so nothing
+is resident: `POST /warm` loads a model in the background. The companion warms the voice when a question starts
+(it loads in ~7 s while the image is analysed) and Whisper while the user is still talking; models are dropped after
+`SPEECH_IDLE_UNLOAD_SEC` (600 s) idle. A short sentence takes about 2 s to synthesize, about half its playback time.
 
 ---
 

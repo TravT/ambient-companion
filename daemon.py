@@ -749,6 +749,27 @@ def synthesize_on_dell(text: str, language: str) -> Optional[bytes]:
     return r.content if r.status_code == 200 and r.content[:4] == b"RIFF" else None
 
 
+def prewarm_speech(model: str, wait: bool = False) -> None:
+    """Ask ambient-speech to load `model` (tts-en, tts-pt, stt) now, so it is ready when needed. Never raises.
+
+    Nothing is resident on the Dell (each voice costs about 1 GB): the voice loads (~7 s) while the image is being
+    analysed, and Whisper while the user is still talking.
+    """
+    if config.TTS_MODE != "dell":
+        return
+
+    def _go() -> None:
+        try:
+            requests.post(f"{config.SPEECH_URL}/warm", json={"model": model}, headers=_speech_headers(), timeout=3)
+        except Exception:
+            pass
+
+    if wait:
+        _go()
+    else:
+        threading.Thread(target=_go, daemon=True).start()
+
+
 def transcribe_on_dell(wav: bytes, language: str = "auto") -> dict:
     """Speech to text with Whisper on the Dell. The first call after idle loads the model (a few seconds)."""
     try:
@@ -828,6 +849,7 @@ def listen_and_answer(answer: bool = True, language: str = "auto", source: str =
     import listen
 
     t0 = time.time()
+    prewarm_speech("stt")                     # Whisper loads while the user is talking
     cap = listen.capture_utterance(max_sec=max_sec)
     out: dict = {"capture": {k: cap.get(k) for k in ("reason", "speech_sec", "total_sec")}}
     if not cap.get("wav"):
@@ -900,6 +922,8 @@ def execute_ambient_cycle(
     cycle_start = time.time()
     if lang is None:
         lang = detect_language(query)
+    if play_audio:
+        prewarm_speech("tts-pt" if lang == "pt" else "tts-en")   # the voice loads while the image is analysed
 
     print(f"\n=======================================================")
     print(f" Ambient Multimodal Companion Cycle")
