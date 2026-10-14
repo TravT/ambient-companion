@@ -753,10 +753,10 @@ def prewarm_speech(model: str, wait: bool = False) -> None:
     """Ask ambient-speech to load `model` (tts-en, tts-pt, stt) now, so it is ready when needed. Never raises.
 
     Nothing is resident on the Dell (each voice costs about 1 GB): the voice loads (~7 s) while the image is being
-    analysed, and Whisper while the user is still talking.
+    analysed, and Whisper while the user is still talking. Voice warm-ups only apply in AMBIENT_TTS_MODE=dell.
     """
-    if config.TTS_MODE != "dell":
-        return
+    if model.startswith("tts-") and config.TTS_MODE != "dell":
+        return                                  # the voice is made elsewhere; Whisper always runs on the Dell
 
     def _go() -> None:
         try:

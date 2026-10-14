@@ -71,9 +71,10 @@ READ_PX = int(os.getenv("AMBIENT_READ_PX", "768"))
 GROUND_PX = int(os.getenv("AMBIENT_GROUND_PX", "1024"))
 
 # --- Voice ---
-# dell: the ambient-speech service on the Dell synthesizes (default voices), the phone only plays (default,
-#       owner decision 2026-10-14); falls back to edge when the service is down
-# edge: pocket-tts runs on the S20 FE (Termux) and plays through paplay (PRJ-12 Phase 10)
+# dell: the ambient-speech service on the Dell synthesizes (default voices), the phone only plays; falls back to
+#       edge when the service is down. About 1 GB of Dell RAM per loaded voice.
+# edge: pocket-tts runs on the S20 FE (Termux) and plays through paplay (PRJ-12 Phase 10). The live job sets this
+#       (owner decision 2026-10-14: the Dell has ~1 GB free; push-to-talk still uses Whisper on the Dell)
 # host: synthesize here with POCKET_TTS_BIN, push the WAV to the phone (dev CLI on the Dell)
 # off:  never speak
 TTS_MODE = os.getenv("AMBIENT_TTS_MODE", "dell").lower()

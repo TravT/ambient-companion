@@ -243,10 +243,16 @@ class TestPrewarm(unittest.TestCase):
         with mock.patch.object(daemon.requests, "post", side_effect=OSError("down")):
             daemon.prewarm_speech("stt", wait=True)                       # silently ignored
 
-    def test_no_prewarm_outside_dell_mode(self):
+    def test_no_voice_prewarm_outside_dell_mode(self):
         with mock.patch.object(config, "TTS_MODE", "edge"), mock.patch.object(daemon.requests, "post") as post:
             daemon.prewarm_speech("tts-en", wait=True)
         post.assert_not_called()
+
+    def test_whisper_prewarm_does_not_depend_on_the_voice_mode(self):
+        with mock.patch.object(config, "TTS_MODE", "edge"), \
+                mock.patch.object(daemon.requests, "post", return_value=FakeResp(202)) as post:
+            daemon.prewarm_speech("stt", wait=True)
+        self.assertEqual(post.call_args.kwargs["json"], {"model": "stt"})
 
     def test_listen_prewarms_whisper_before_capturing(self):
         order = []
