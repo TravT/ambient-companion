@@ -90,3 +90,32 @@ class TestGroupSummary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRescore(unittest.TestCase):
+    def test_rescore_recomputes_scores_from_stored_answers(self):
+        import json
+        cases = [{"id": "c1", "group": "text", "image": "x.jpg", "questions": [
+            {"q": "Hours?", "kind": "describe", "any_of": ["21:00"]},
+            {"q": "Where?", "kind": "locate", "expect_click": [100, 100], "tolerance": 50}]}]
+        rows = [
+            {"case": "c1", "q": "Hours?", "kind": "describe", "backend": "gpu", "px": 512, "score": 0.0,
+             "latency": 0.1, "answer": "7:00 to 21:00", "status": "success", "click_error": None},
+            {"case": "c1", "q": "Where?", "kind": "locate", "backend": "gpu", "px": 512, "score": 0.0,
+             "latency": 0.1, "answer": "[1,2,3,4]", "status": "success", "click_error": 30.0},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            res = Path(d) / "r.jsonl"
+            res.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            with mock.patch.object(run_eval, "load_cases", return_value=cases):
+                out = run_eval.rescore(Path(d) / "cases.yaml", res)
+        self.assertEqual([r["score"] for r in out], [1.0, 1.0])
+        self.assertEqual({r["group"] for r in out}, {"text"})
+
+    def test_failed_backend_calls_keep_their_error_and_are_excluded(self):
+        rows = [{"group": "g", "backend": "gpu", "px": 512, "score": 0.0, "latency": 0.1, "status": "error"},
+                {"group": "g", "backend": "gpu", "px": 512, "score": 1.0, "latency": 0.1, "status": "success"}]
+        got = run_eval.group_summary(rows)
+        self.assertEqual(got[0]["n"], 1)
+        self.assertEqual(got[0]["accuracy"], 1.0)
+        self.assertEqual(got[0]["errors"], 1)

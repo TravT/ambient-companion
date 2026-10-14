@@ -118,14 +118,22 @@ def score_click(boxes: Iterable[Dict[str, Any]], truth: Tuple[int, int], toleran
 
 
 # ---- descriptions ----------------------------------------------------------------------------------------
+def has_phrase(answer: str, phrase: str) -> bool:
+    """Whole-word phrase match after normalize(); the last word may take a plural s/es ("apple" ~ "apples")."""
+    words = normalize(phrase).split()
+    if not words:
+        return False
+    pattern = " ".join([re.escape(w) for w in words[:-1]] + [re.escape(words[-1]) + "(?:s|es)?"])
+    return re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", normalize(answer)) is not None
+
+
 def score_keywords(answer: str, all_of: Sequence[str] = (), any_of: Sequence[str] = ()) -> float:
-    """Mean of: fraction of all_of words present, and 1/0 for at least one any_of word present."""
-    a = set(normalize(answer).split())
+    """Mean of: fraction of all_of phrases present, and 1/0 for at least one any_of phrase present."""
     parts: List[float] = []
     if all_of:
-        parts.append(sum(1 for w in all_of if normalize(w) in a) / len(all_of))
+        parts.append(sum(1 for w in all_of if has_phrase(answer, w)) / len(all_of))
     if any_of:
-        parts.append(1.0 if any(normalize(w) in a for w in any_of) else 0.0)
+        parts.append(1.0 if any(has_phrase(answer, w) for w in any_of) else 0.0)
     return sum(parts) / len(parts) if parts else 1.0
 
 

@@ -103,9 +103,11 @@ def run(cases_file: Path, backends: List[str], sizes: List[int], limit: Optional
                         ) if q.get("kind") == "locate" else []
                         row = {"case": case["id"], "group": case.get("group", ""), "q": q["q"], "kind": q.get("kind", "describe"), "backend": backend,
                                "px": px, "score": score_question(q, answer, boxes), "latency": round(latency, 2),
-                               "cold": n == 0, "tokens": res.get("prompt_tokens", 0), "answer": answer[:160],
+                               "cold": n == 0, "tokens": res.get("prompt_tokens", 0), "answer": answer,
                                "click_error": scoring.click_error(boxes, tuple(q["expect_click"])) if q.get("kind") == "locate" else None,
                                "status": res.get("status")}
+                        if res.get("status") != "success":
+                            row["error"] = str(res.get("error", ""))[:300]
                         rows.append(row)
                         sink.write(json.dumps(row, ensure_ascii=False) + "\n")
                         sink.flush()
@@ -113,15 +115,44 @@ def run(cases_file: Path, backends: List[str], sizes: List[int], limit: Optional
     return rows
 
 
+def answered(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rows where the backend answered; failed calls (server down, timeout) say nothing about the model."""
+    return [r for r in rows if r.get("status", "success") == "success"]
+
+
 def group_summary(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Accuracy and median latency per (photo group, backend, size), sorted by group."""
+    """Accuracy and median latency per (photo group, backend, size), sorted by group; failed calls counted apart."""
     buckets: Dict[tuple, List[Dict[str, Any]]] = {}
     for r in rows:
         buckets.setdefault((r.get("group", ""), r["backend"], r["px"]), []).append(r)
-    return [{"group": g, "backend": b, "px": px, "n": len(rs),
-             "accuracy": sum(r["score"] for r in rs) / len(rs),
-             "median_latency": round(statistics.median(r["latency"] for r in rs), 1)}
-            for (g, b, px), rs in sorted(buckets.items())]
+    out = []
+    for (g, b, px), rs in sorted(buckets.items()):
+        ok = answered(rs)
+        out.append({"group": g, "backend": b, "px": px, "n": len(ok), "errors": len(rs) - len(ok),
+                    "accuracy": sum(r["score"] for r in ok) / len(ok) if ok else 0.0,
+                    "median_latency": round(statistics.median(r["latency"] for r in ok), 1) if ok else None})
+    return out
+
+
+def rescore(cases_file: Path, results: Path) -> List[Dict[str, Any]]:
+    """Recompute scores (and groups) of a results JSONL from its stored answers, after a rubric or scorer fix."""
+    questions = {}
+    for case in load_cases(cases_file):
+        for q in case["questions"]:
+            questions[(case["id"], q["q"])] = (q, case.get("group", ""))
+    rows = []
+    for line in results.read_text().splitlines():
+        r = json.loads(line)
+        q, group = questions.get((r["case"], r["q"]), (None, r.get("group", "")))
+        r["group"] = group
+        if q is not None and r.get("status", "success") == "success":
+            if q.get("kind") == "locate":
+                err = r.get("click_error")
+                r["score"] = 1.0 if err is not None and err <= int(q.get("tolerance", 80)) else 0.0
+            else:
+                r["score"] = score_question(q, r.get("answer", ""), [])
+        rows.append(r)
+    return rows
 
 
 def print_summary(rows: List[Dict[str, Any]]) -> None:
@@ -129,6 +160,10 @@ def print_summary(rows: List[Dict[str, Any]]) -> None:
         print(f"\n{title}\n\n| kind | backend | px | n | accuracy | median latency |\n| --- | --- | ---: | ---: | ---: | ---: |")
         for r in scoring.summarize(subset):
             print(f"| {r['kind']} | {r['backend']} | {r['px']} | {r['n']} | {r['accuracy']:.0%} | {r['median_latency']} s |")
+    failed = len(rows) - len(answered(rows))
+    if failed:
+        print(f"\n{failed} of {len(rows)} calls failed (backend error/timeout) and are left out of the accuracy below.")
+    rows = answered(rows)
     table("All questions", rows)
     table("First question per image/size/backend only (cold image, no cache help)", [r for r in rows if r["cold"]])
     if any(r.get("group") for r in rows):
@@ -145,7 +180,16 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None, help="only the first N cases")
     ap.add_argument("--only", default=None, help="only cases whose id contains this text (e.g. text-)")
     ap.add_argument("--out", type=Path, default=None, help="results JSONL (default: next to the cases file)")
+    ap.add_argument("--rescore", type=Path, default=None,
+                    help="re-score an existing results JSONL with the current cases/scorer (no model calls)")
     args = ap.parse_args()
+    if args.rescore:
+        rows = rescore(args.cases, args.rescore)
+        out = args.rescore.with_suffix(".rescored.jsonl")
+        out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+        print_summary(rows)
+        print(f"\nrescored: {out}")
+        return 0
     out = args.out or args.cases.parent / f"results-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     rows = run(args.cases, [b.strip() for b in args.backends.split(",") if b.strip()],
                [int(p) for p in args.px.split(",")], args.limit, out, args.only)
