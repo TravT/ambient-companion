@@ -493,7 +493,7 @@ def play_audio_on_edge(wav_path: Path) -> bool:
                    capture_output=True, check=False)
     if not ensure_edge_audio():
         return False
-    ok, _ = _play_wav_on_edge(remote_wav)
+    ok, _ = play_with_recovery(remote_wav)
     return ok
 
 
@@ -549,6 +549,20 @@ def _play_wav_on_edge(remote_wav: str) -> Tuple[bool, str]:
     ok = bool(lines) and lines[-1].strip() == "RC=0"
     detail = "\n".join(l for l in lines if not l.startswith("RC=")).strip()
     return ok, detail
+
+
+def play_with_recovery(remote_wav: str) -> Tuple[bool, str]:
+    """paplay; on failure force a PulseAudio restart and try once more. A daemon can answer the health check while
+    its AAudio sink is stuck (2026-10-14 09:46, after ~8 h idle), so a failed play is the real signal."""
+    ok, detail = _play_wav_on_edge(remote_wav)
+    if ok:
+        return ok, detail
+    if ensure_edge_audio(force=True):
+        ok, retry_detail = _play_wav_on_edge(remote_wav)
+        if ok:
+            return ok, retry_detail
+        detail = retry_detail or detail
+    return False, detail
 
 
 def tts_available() -> bool:
@@ -623,7 +637,7 @@ def speak_on_edge(text: str, language: str) -> dict:
                 "where": where, "error": "phone audio (PulseAudio) is down and could not be restarted"}
     subprocess.run(adb_args("shell", "cmd media_session volume --stream 3 --set 5"),
                    capture_output=True, check=False)
-    played, detail = _play_wav_on_edge(remote_wav)
+    played, detail = play_with_recovery(remote_wav)
     run_edge_command(f"rm -f {shlex.quote(remote_wav)}", timeout=10)
     result = {"status": "success" if played else "error", "played": played, "language": language,
               "duration_sec": round(synth_dur, 2), "where": where}
@@ -689,7 +703,7 @@ def _speak_chunked(text: str, language: str, produce, cleanup, where: str) -> di
             first_audio = time.time() - t0
             subprocess.run(adb_args("shell", "cmd media_session volume --stream 3 --set 5"),
                            capture_output=True, check=False)
-        ok, detail = _play_wav_on_edge(wav)
+        ok, detail = play_with_recovery(wav)
         played_any = played_any or ok
         if not ok and not audio_error:
             audio_error = detail or "paplay failed on the phone"

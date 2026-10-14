@@ -328,7 +328,8 @@ class TestPhoneAudio(unittest.TestCase):
             self.assertFalse(daemon.ensure_edge_audio(force=True))
 
     def test_playback_failure_is_reported_not_claimed_as_played(self):
-        outputs = ["SYNTH_OK", "Connection failure: Connection refused\nRC=1", ""]
+        # the retry after a forced PulseAudio restart fails too, so the failure must still be reported
+        outputs = ["SYNTH_OK", "Connection failure: Connection refused\nRC=1", "Connection failure: Connection refused\nRC=1", ""]
         calls = []
 
         def fake(cmd, timeout=45, as_root=False):
@@ -429,3 +430,32 @@ class TestHousekeeping(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlaybackRetry(unittest.TestCase):
+    """A daemon can pass the health check while its AAudio sink is stuck (2026-10-14 09:46): paplay fails, so
+    playback forces a PulseAudio restart and tries once more."""
+
+    def test_failed_play_forces_recovery_and_retries_once(self):
+        plays = iter([(False, "Connection failure: Timeout"), (True, "")])
+        with mock.patch.object(daemon, "_play_wav_on_edge", side_effect=lambda r: next(plays)) as play, \
+                mock.patch.object(daemon, "ensure_edge_audio", return_value=True) as ensure:
+            ok, detail = daemon.play_with_recovery("/data/local/tmp/x.wav")
+        self.assertTrue(ok)
+        self.assertEqual(play.call_count, 2)
+        ensure.assert_called_once_with(force=True)
+
+    def test_gives_up_after_one_retry(self):
+        with mock.patch.object(daemon, "_play_wav_on_edge", return_value=(False, "refused")) as play, \
+                mock.patch.object(daemon, "ensure_edge_audio", return_value=True):
+            ok, detail = daemon.play_with_recovery("x.wav")
+        self.assertFalse(ok)
+        self.assertEqual(play.call_count, 2)
+        self.assertIn("refused", detail)
+
+    def test_no_retry_when_the_first_play_works(self):
+        with mock.patch.object(daemon, "_play_wav_on_edge", return_value=(True, "")) as play, \
+                mock.patch.object(daemon, "ensure_edge_audio") as ensure:
+            self.assertTrue(daemon.play_with_recovery("x.wav")[0])
+        self.assertEqual(play.call_count, 1)
+        ensure.assert_not_called()
